@@ -12,6 +12,9 @@ export type SourceUnit = {
   sourceByteEnd: number;
   partial?: boolean;
   ownerHeaders?: Range[];
+  /** Structural class, impl or module source between members. The name alone cannot identify
+   * it: a real member named `context` shares the `<Owner>.context` name. */
+  classContext?: true;
 };
 export type Inspection = {
   units: SourceUnit[];
@@ -126,22 +129,21 @@ export async function inspect(
       : [],
   });
   if (Buffer.byteLength(source) > maxParseBytes) return fallback("size");
-  let units: { name: string; range: Range; ownerHeaders?: Range[] }[] = [],
+  let units: { name: string; range: Range; ownerHeaders?: Range[]; classContext?: true }[] = [],
     comments: Range[] = [],
     mode: Inspection["mode"];
   let syntaxFallback = false;
   if (language === "python") {
     // A missing/incompatible packaged parser is a setup failure, never syntax fallback.
-    const parsed = await runParser<Array<Range & { name: string; ownerHeaders: Range[] }>>(
-      "inspect",
-      source,
-      options.signal,
-    );
+    const parsed = await runParser<
+      Array<Range & { name: string; ownerHeaders: Range[]; classContext?: boolean }>
+    >("inspect", source, options.signal);
     if (parsed === null) return fallback("syntax");
-    units = parsed.map(({ name, startLine, endLine, ownerHeaders }) => ({
+    units = parsed.map(({ name, startLine, endLine, ownerHeaders, classContext }) => ({
       name,
       range: { startLine, endLine },
       ownerHeaders,
+      ...(classContext === true ? { classContext: true as const } : {}),
     }));
     comments = pythonComments;
     mode = "python";
@@ -170,7 +172,13 @@ export async function inspect(
           first = line(node.members[0]!.getStart(file));
         const header = first > start ? { startLine: start, endLine: first - 1 } : undefined;
         const headers = header ? [...ownerHeaders, header] : ownerHeaders;
-        if (header) units.push({ name: name + ".context", range: header, ownerHeaders: headers });
+        if (header)
+          units.push({
+            name: name + ".context",
+            range: header,
+            ownerHeaders: headers,
+            classContext: true,
+          });
         for (const member of node.members) add(member, name + ".", headers);
       } else
         units.push({
@@ -208,7 +216,10 @@ export async function inspect(
       options.signal,
     );
     if (!parsed) return fallback("syntax");
-    units = parsed.units;
+    units = parsed.units.map(({ classContext, ...unit }) => ({
+      ...unit,
+      ...(classContext === true ? { classContext: true as const } : {}),
+    }));
     comments = parsed.comments;
     mode = language;
   } else return fallback("unsupported");
@@ -242,6 +253,7 @@ export async function inspect(
         text.bytes.length,
         text.offsets[unit.range.endLine] ?? text.bytes.length,
       );
+      const marker = unit.classContext ? { classContext: true as const } : {};
       if (end - start <= maxUnitBytes)
         return [
           {
@@ -251,11 +263,13 @@ export async function inspect(
             ownerHeaders: unit.ownerHeaders,
             sourceByteStart: start,
             sourceByteEnd: end,
+            ...marker,
           },
         ];
       return textUnits(text, unit.range, unit.name, maxUnitBytes, true).map((part) => ({
         ...part,
         ownerHeaders: unit.ownerHeaders,
+        ...marker,
       }));
     }),
   };
