@@ -126,8 +126,16 @@ Current protocols and subsequent experiments are in the
 
 Searches send eligible source content to Jev through the provider selected during auth. Default
 filesystem filtering respects ignore files and excludes hidden, dependency/build,
-binary, and obvious credential files. These filters are not a guarantee that all
+binary, and obvious credential files, including `.env` variants and any path
+component whose name ends in `.env`.
+It also excludes a whole file as `sensitive_content` when its text matches a
+conservative credential heuristic: a known provider token prefix (such as `npm_`
+or `glpat-`), a Slack webhook URL, or a credential-shaped assignment with a
+long, high-entropy value. UUID-shaped identifiers are excluded from that entropy
+signal. This is best-effort detection, not redaction or a guarantee that all
 sensitive information has been removed; choose a search root you intend to send.
+Use `--include-sensitive` when a search must include sensitive names, private-key
+markers, and content-level matches.
 `jg files [root]` counts the files a search under that root may read, grouped by
 top-level directory, with no provider key or network request. It takes the same
 filtering flags as search.

@@ -465,3 +465,77 @@ test("valid UTF-8 control-byte binary and invalid UTF-8 remain excluded under ev
     await reader.close();
   }
 });
+
+test("readSnapshot excludes files whose content looks like stored secrets", async () => {
+  const fakeKey = "sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v"; // synthetic and invalid
+  const root = await fixture({
+    "settings.json": `{\n  "env": {\n    "OPENAI_API_KEY": "${fakeKey}"\n  }\n}\n`,
+    "src/settings.ts": `export function loadSettings() {\n  return "settings.json";\n}\n`,
+    "credentials.json": "SECRET_SENTINEL",
+  });
+  const reader = await createFilesystem({ root });
+  try {
+    expect(await reader.readSnapshot("settings.json")).toMatchObject({
+      status: "excluded",
+      reason: "sensitive_content",
+    });
+    expect(await reader.readSnapshot("src/settings.ts")).toMatchObject({ status: "ok" });
+    expect(await reader.readSnapshot("credentials.json")).toMatchObject({
+      status: "excluded",
+      reason: "sensitive_name",
+    });
+  } finally {
+    await reader.close();
+  }
+});
+
+test("includeSensitive bypasses content-level secret filtering", async () => {
+  const fakeKey = "sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v"; // synthetic and invalid
+  const root = await fixture({
+    "settings.json": `{\n  "env": {\n    "OPENAI_API_KEY": "${fakeKey}"\n  }\n}\n`,
+  });
+  const reader = await createFilesystem({ root, policy: { includeSensitive: true } });
+  try {
+    expect(await reader.readSnapshot("settings.json")).toMatchObject({ status: "ok" });
+  } finally {
+    await reader.close();
+  }
+});
+
+test("sensitive suffix policy excludes .env files at any path depth", async () => {
+  const root = await fixture({
+    "config/application.env": "PRIVATE_VALUE=not-a-token\n",
+    "config.env/application.ts": "export const value = 1;\n",
+  });
+  const reader = await createFilesystem({ root });
+  try {
+    expect(await reader.readSnapshot("config/application.env")).toMatchObject({
+      status: "excluded",
+      reason: "sensitive_name",
+    });
+    expect(await reader.readSnapshot("config.env/application.ts")).toMatchObject({
+      status: "excluded",
+      reason: "sensitive_name",
+    });
+  } finally {
+    await reader.close();
+  }
+});
+
+test("includeSensitive also bypasses GitLab token content filtering", async () => {
+  const root = await fixture({
+    "gitlab.json": '{"token":"glpat-abcDEF1234567890abcdef1234567890ab"}\n',
+  });
+  const defaultReader = await createFilesystem({ root });
+  const broadReader = await createFilesystem({ root, policy: { includeSensitive: true } });
+  try {
+    expect(await defaultReader.readSnapshot("gitlab.json")).toMatchObject({
+      status: "excluded",
+      reason: "sensitive_content",
+    });
+    expect(await broadReader.readSnapshot("gitlab.json")).toMatchObject({ status: "ok" });
+  } finally {
+    await defaultReader.close();
+    await broadReader.close();
+  }
+});
