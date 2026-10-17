@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats, type Dir } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import ignore, { type Ignore } from "ignore";
+import { storageDirectory } from "./storage";
 
 /** These independent switches broaden only their named exclusion category. */
 export type FilesystemPolicy = {
@@ -11,6 +11,8 @@ export type FilesystemPolicy = {
   noIgnore?: boolean;
   includeDependencies?: boolean;
   includeSensitive?: boolean;
+  /** Root-relative gitignore patterns that only narrow eligibility; repository rules cannot re-admit them. */
+  exclude?: readonly string[];
 };
 export type Snapshot = Readonly<{ path: string; contentHash: string; source: string }>;
 export type FilesystemIssue = {
@@ -20,9 +22,11 @@ export type FilesystemIssue = {
 type Excluded = { status: "excluded"; reason: string };
 type Issue = { status: "issue"; issue: FilesystemIssue };
 export type SnapshotResult = { status: "ok"; snapshot: Snapshot } | Excluded | Issue;
-export type DirectoryEntry = { path: string; kind: "file" | "directory" };
+export type DirectoryEntry = { path: string; kind: "file" | "directory"; bytes?: number };
 export type DirectoryPage = {
   entries: DirectoryEntry[];
+  /** Per-reason counts of entries this page skipped; a skipped directory counts once. */
+  excluded: Record<string, number>;
   nextCursor?: string;
   issues: FilesystemIssue[];
 };
@@ -67,7 +71,7 @@ export const filesystemDefaults = Object.freeze({
 export type FilesystemOptions = {
   root: string;
   policy?: FilesystemPolicy;
-  /** Absolute credential/cache locations beyond the default XDG locations. Always excluded. */
+  /** Additional absolute credential/cache locations. Always excluded. */
   protectedPaths?: readonly string[];
   limits?: Partial<
     Pick<
@@ -126,6 +130,7 @@ export async function createFilesystem(options: FilesystemOptions) {
   const rootStat = await lstat(root, { bigint: true });
   if (!rootStat.isDirectory()) throw new Error("Search root must be a directory");
   const policy = Object.freeze({ ...options.policy });
+  const excludeRules = policy.exclude?.length ? ignore().add(policy.exclude) : undefined;
   const limits = { ...filesystemDefaults, ...options.limits };
   for (const name of [
     "pageSize",
@@ -137,18 +142,16 @@ export async function createFilesystem(options: FilesystemOptions) {
       throw new Error(`Invalid filesystem limit: ${name}`);
   }
   const protectedPaths = await Promise.all(
-    [
-      join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "jevgrep"),
-      join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "jevgrep"),
-      ...(options.protectedPaths ?? []),
-    ].map(async (path) => {
-      const absolute = resolve(path);
-      try {
-        return await realpath(absolute);
-      } catch {
-        return absolute;
-      }
-    }),
+    [storageDirectory("config"), storageDirectory("cache"), ...(options.protectedPaths ?? [])].map(
+      async (path) => {
+        const absolute = resolve(path);
+        try {
+          return await realpath(absolute);
+        } catch {
+          return absolute;
+        }
+      },
+    ),
   );
   const cursors = new Map<string, Cursor>();
   let closed = false;
@@ -198,7 +201,7 @@ export async function createFilesystem(options: FilesystemOptions) {
       // NONBLOCK prevents a concurrent replacement with a FIFO from hanging the process.
       handle = await open(
         identity.absolute,
-        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
       );
       const before = await handle.stat({ bigint: true });
       if (!before.isFile() || !same(identity.stat, before)) return issue("changed", identity.path);
@@ -335,6 +338,9 @@ export async function createFilesystem(options: FilesystemOptions) {
           }
         }
         if (ignored) return excluded("ignored");
+        const rootRelative = components.slice(0, index + 1).join("/");
+        if (excludeRules?.ignores(rootRelative + (stat.isDirectory() ? "/" : "")))
+          return excluded("exclude_pattern");
         if (index === components.length - 1)
           return { status: "eligible", ...named, stat, ancestors };
         if (!stat.isDirectory()) return excluded("not_directory");
@@ -362,7 +368,7 @@ export async function createFilesystem(options: FilesystemOptions) {
     const current = await eligibility(path);
     if (current.status !== "eligible") return current;
     if (!same(admitted.stat, current.stat)) return issue("changed", admitted.path);
-    if (read.bytes.some((byte) => (byte < 32 && ![9, 10, 12, 13].includes(byte)) || byte === 127))
+    if (/[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(read.bytes.toString("latin1")))
       return excluded("binary");
     let source: string;
     try {
@@ -389,20 +395,21 @@ export async function createFilesystem(options: FilesystemOptions) {
   /** Consume a cursor serially; closeCursor releases a deliberately pruned directory without draining it. */
   async function listPage(path = ".", token?: string): Promise<DirectoryPage> {
     const entries: DirectoryEntry[] = [];
+    const excluded: Record<string, number> = {};
     const issues: FilesystemIssue[] = [];
     const named = pathName(path);
-    if (!named) return { entries, issues };
+    if (!named) return { entries, excluded, issues };
     let cursor = token ? cursors.get(token) : undefined;
     if (token && (!cursor || cursor.directory !== named.path))
       throw new Error("Invalid directory cursor");
     try {
       if (!cursor) {
         const admitted = await eligibility(path);
-        if (admitted.status === "issue") return { entries, issues: [admitted.issue] };
+        if (admitted.status === "issue") return { entries, excluded, issues: [admitted.issue] };
         if (admitted.status !== "eligible" || !admitted.stat.isDirectory())
-          return { entries, issues };
+          return { entries, excluded, issues };
         if (cursors.size + openingDirectories >= limits.maxOpenDirectories)
-          return { entries, issues: [issue("resource_limit", named.path).issue] };
+          return { entries, excluded, issues: [issue("resource_limit", named.path).issue] };
         openingDirectories++;
         try {
           cursor = {
@@ -415,7 +422,7 @@ export async function createFilesystem(options: FilesystemOptions) {
         }
         if (stopped(named.path)) {
           await cursor.handle.close();
-          return { entries, issues: [issue("interrupted", named.path).issue] };
+          return { entries, excluded, issues: [issue("interrupted", named.path).issue] };
         }
         token = randomUUID();
         cursors.set(token, cursor);
@@ -423,7 +430,7 @@ export async function createFilesystem(options: FilesystemOptions) {
       if (stopped(named.path) || !(await stable(cursor.identity))) {
         issues.push(issue(stopped(named.path) ? "interrupted" : "changed", named.path).issue);
         await discard(token!);
-        return { entries, issues };
+        return { entries, excluded, issues };
       }
       for (let scanned = 0; scanned < limits.pageSize; scanned++) {
         const entry = await cursor.handle.read();
@@ -431,8 +438,12 @@ export async function createFilesystem(options: FilesystemOptions) {
           const unchanged = await stable(cursor.identity);
           await discard(token!);
           return unchanged
-            ? { entries, issues }
-            : { entries: [], issues: [...issues, issue("changed", named.path).issue] };
+            ? { entries, excluded, issues }
+            : {
+                entries: [],
+                excluded: {},
+                issues: [...issues, issue("changed", named.path).issue],
+              };
         }
         const relativePath = named.path ? `${named.path}/${entry.name}` : entry.name;
         const admitted = await eligibility(relativePath);
@@ -440,22 +451,32 @@ export async function createFilesystem(options: FilesystemOptions) {
           issues.push(admitted.issue);
           if (admitted.issue.kind === "interrupted") {
             await discard(token!);
-            return { entries, issues };
+            return { entries, excluded, issues };
           }
         } else if (admitted.status === "eligible")
-          entries.push({
-            path: relativePath,
-            kind: admitted.stat.isDirectory() ? "directory" : "file",
-          });
+          entries.push(
+            admitted.stat.isDirectory()
+              ? { path: relativePath, kind: "directory" }
+              : { path: relativePath, kind: "file", bytes: Number(admitted.stat.size) },
+          );
+        else excluded[admitted.reason] = (excluded[admitted.reason] ?? 0) + 1;
       }
       if (!(await stable(cursor.identity))) {
         await discard(token!);
-        return { entries: [], issues: [...issues, issue("changed", named.path).issue] };
+        return {
+          entries: [],
+          excluded: {},
+          issues: [...issues, issue("changed", named.path).issue],
+        };
       }
-      return { entries, nextCursor: token, issues };
+      return { entries, excluded, nextCursor: token, issues };
     } catch (error) {
       if (token) await discard(token);
-      return { entries: [], issues: [...issues, issue(errorKind(error), named.path).issue] };
+      return {
+        entries: [],
+        excluded: {},
+        issues: [...issues, issue(errorKind(error), named.path).issue],
+      };
     }
   }
   async function close() {

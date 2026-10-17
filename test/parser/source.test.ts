@@ -1,6 +1,44 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inspect } from "../../packages/core/src/source.ts";
+import { inspect, pythonNeighborhood } from "../../packages/core/src/source.ts";
+
+test("extensionless Python shebangs preserve declarations, comments and neighboring source", async () => {
+  for (const shebang of [
+    "#!/usr/bin/env python3",
+    "#!/usr/bin/env -S python3 -u",
+    "#!/usr/bin/env -S PYTHONUNBUFFERED=1 python3",
+    "#!/usr/bin/env -S -u PYTHONPATH python3",
+    "#! /usr/bin/python3.12\r",
+  ]) {
+    const source =
+      shebang +
+      '\n# module\nclass Example:\n    """context"""\n    def first(self):\n        return "é"\n    @decorator\n    def middle(self):\n        return self.first()\n    def last(self):\n        pass\n';
+    const snapshot = { path: "bin/tool", contentHash: "fixture", source };
+    const withExtension = { ...snapshot, path: "bin/tool.py" };
+    const expected = await inspect(withExtension);
+    assert.equal(expected.mode, "python");
+    assert.deepEqual(await inspect(snapshot), expected, shebang);
+    const selected = [{ startLine: 8, endLine: 9 }];
+    const neighbors = await pythonNeighborhood(withExtension, selected);
+    assert.ok(neighbors.some((range) => range.startLine === 5 && range.endLine === 6));
+    assert.deepEqual(await pythonNeighborhood(snapshot, selected), neighbors, shebang);
+  }
+});
+
+test("extensionless Node shebangs preserve JavaScript declarations and selected source", async () => {
+  for (const shebang of [
+    "#!/usr/bin/env node",
+    "#!/usr/bin/nodejs",
+    "#!/usr/bin/env -S NODE_ENV=production node",
+  ]) {
+    const source = shebang + '\n// module\nfunction target() {\n  return "🙂";\n}\n';
+    const snapshot = { path: "bin/tool", contentHash: "fixture", source };
+    const expected = await inspect({ ...snapshot, path: "bin/tool.js" });
+    assert.equal(expected.mode, "typescript");
+    assert.deepEqual(await inspect(snapshot), expected, shebang);
+    assert.equal(expected.units[0]!.name, "target");
+  }
+});
 
 test("Python preserves decorators, class context and nested declarations", async () => {
   const source =
@@ -21,11 +59,48 @@ test("Python preserves decorators, class context and nested declarations", async
   assert.deepEqual(result.comments, [{ startLine: 1, endLine: 1 }]);
 });
 
+test("comments between adjacent byte strings preserve structural source selection", async () => {
+  const source = "def target():\n    return (b'a' # comment\n            b'b')\n";
+  const snapshot = { path: "sample.py", contentHash: "fixture", source };
+  const result = await inspect(snapshot);
+  assert.equal(result.mode, "python");
+  assert.deepEqual(
+    result.units.map(({ name, range }) => ({ name, ...range })),
+    [{ name: "target", startLine: 1, endLine: 3 }],
+  );
+  const { sourceForUnit } = await import("../../packages/core/src/source.ts");
+  assert.equal(sourceForUnit(snapshot, result.units[0]!), source);
+});
+
+test("parenthesized deletion targets preserve Python declaration ranges", async () => {
+  for (const target of [
+    "(self.cached)",
+    "(\n            # target\n            self.cached\n        )",
+    "((items[0]))",
+  ]) {
+    const source = `def target(self, items):\n    del ${target}\n`;
+    const snapshot = { path: "sample.py", contentHash: "fixture", source };
+    const result = await inspect(snapshot);
+    assert.equal(result.mode, "python");
+    assert.deepEqual(
+      result.units.map(({ name, range }) => ({ name, ...range })),
+      [{ name: "target", startLine: 1, endLine: source.trimEnd().split("\n").length }],
+    );
+    const { sourceForUnit } = await import("../../packages/core/src/source.ts");
+    assert.equal(sourceForUnit(snapshot, result.units[0]!), source);
+  }
+});
+
 test("syntax errors and unsupported source fall back without losing source lines", async () => {
   for (const [path, source, reason] of [
     ["bad.py", "def broken(:\n  return 2\n", "syntax"],
     ["bad.ts", "const = ;", "syntax"],
     ["readme.md", "éé\r\nnext\r\nlast", "unsupported"],
+    ["tool", "def target():\n    pass\n", "unsupported"],
+    ["tool", "#!/bin/bash\ndef target():\n    pass\n", "unsupported"],
+    ["tool", "\n#!/usr/bin/env python3\ndef target():\n    pass\n", "unsupported"],
+    ["tool.sh", "#!/usr/bin/env python3\ndef target():\n    pass\n", "unsupported"],
+    ["tool.js", "#!/usr/bin/env python3\ndef target():\n    pass\n", "syntax"],
   ]) {
     const result = await inspect(
       { path: path!, source: source!, contentHash: "fixture" },
@@ -102,7 +177,7 @@ test("TS/JS uses original source coordinates, comments, and decorator-bearing me
   ]);
 });
 
-test("syntax outside reference Python 3.11 falls back across inspection, preview and neighbors", async () => {
+test("unsupported Python 2 syntax falls back across inspection, preview and neighbors", async () => {
   const { pythonNeighborhood, pythonPreview, sourceForUnit } =
     await import("../../packages/core/src/source.ts");
   for (const source of [
@@ -121,14 +196,6 @@ test("syntax outside reference Python 3.11 falls back across inspection, preview
     "def target((first, second)):\n    return first\n",
     "def target((first, second)=(1, 2)):\n    return first\n",
     "value = lambda (first, second): first\n",
-    "type Alias = int\n",
-    "def target[T](value: T):\n    return value\n",
-    'value = f"{mapping["key"]}"\n',
-    "value = f\"{'\\n'}\"\n",
-    'value = f"""{value # comment\n}"""\n',
-    'value = f"{(value +\n other)}"\n',
-    "value = f'{1:{mapping['width']}}'\n",
-    "value = f'{1:{\"\\n\"}}'\n",
   ]) {
     const snapshot = {
       path: "old.py",
@@ -155,6 +222,14 @@ test("syntax outside reference Python 3.11 falls back across inspection, preview
 
 test("Python 3 equivalents and Python 2-looking strings remain parsed", async () => {
   for (const source of [
+    "type Alias = int\n",
+    "def target[T](value: T):\n    return value\n",
+    'value = f"{mapping["key"]}"\n',
+    "value = f\"{'\\n'}\"\n",
+    'value = f"""{value # comment\n}"""\n',
+    'value = f"{(value +\n other)}"\n',
+    "value = f'{1:{mapping['width']}}'\n",
+    "value = f'{1:{\"\\n\"}}'\n",
     'print("old")\n',
     "print >> stream, value\n",
     "print +1\nprint [1,2]\n",

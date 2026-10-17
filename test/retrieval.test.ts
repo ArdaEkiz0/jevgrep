@@ -1,12 +1,88 @@
 import { renderResult } from "../apps/cli/src/render";
 import { routeProviderFetch } from "./fixtures/provider-route.mjs";
-import { expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testIfDocker } from "./helpers/docker";
 import { retrieve } from "../packages/core/src/retrieve";
 import { createEvaluator, EvaluationFailure } from "../packages/core/src/evaluator";
+
+test("extensionless scripts preserve extension-based provider contents and returned evidence", async () => {
+  for (const [extension, shebang, body] of [
+    [
+      ".py",
+      "#!/usr/bin/env -S python3 -u",
+      'class Base:\n    def helper(self):\n        return "🙂"\nclass Child(Base):\n    def test_target(self):\n        assert self.helper() == "🙂"\n',
+    ],
+    [".js", "#!/usr/bin/env node", 'function target() {\n  return "🙂";\n}\n'],
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "jg-shebang-"));
+    const padding = `${extension === ".py" ? "#" : "//"} ${"padding ".repeat(12)}\n`;
+    const source = `${shebang}\n${padding.repeat(200)}${body}`;
+    const runs = [];
+    try {
+      for (const path of [`tool${extension}`, "tool"]) {
+        const requests: string[] = [];
+        await writeFile(join(root, path), source);
+        const signal = new AbortController().signal;
+        const result = await retrieve(
+          { root, query: "test_target target", signal },
+          createEvaluator({
+            provider: "vercel",
+            apiKey: "fixture",
+            signal,
+            fetch: async (_input, init) => {
+              const request = String(init?.body);
+              requests.push(request);
+              const body = JSON.parse(request) as {
+                questions: Record<string, { instructions: string }>;
+              };
+              return Response.json({
+                answers: Object.fromEntries(
+                  Object.entries(body.questions).map(([id, question]) => [
+                    id,
+                    {
+                      type: "noul",
+                      noul: question.instructions.includes("(Base.helper,") ? 0.1 : 0.95,
+                    },
+                  ]),
+                ),
+              });
+            },
+          }),
+        );
+        expect(result.status).toBe("complete");
+        expect(requests.join("\n")).toContain(`"extension":"${path === "tool" ? "" : extension}"`);
+        runs.push({
+          requests: requests.map((request) =>
+            request
+              .replaceAll(`tool${extension}`, "tool")
+              .replaceAll(`"extension":"${extension}"`, '"extension":""'),
+          ),
+          files: JSON.parse(JSON.stringify(result.files).replaceAll(`tool${extension}`, "tool")),
+        });
+        await rm(join(root, path));
+      }
+      expect(runs[0]!.requests.join("\n")).toContain('"name":');
+      if (extension === ".py") {
+        expect(runs[0]!.requests.join("\n")).toContain('"range":"sampled source ranges"');
+        expect(runs[0]!.requests.join("\n")).toContain('"candidates":');
+        expect(runs[0]!.files[0].callLeads).toEqual([
+          {
+            caller: "Child.test_target",
+            name: "Base.helper",
+            range: { startLine: 203, endLine: 204 },
+            unknownEarlierBases: [],
+          },
+        ]);
+      }
+      expect(runs[1]).toEqual(runs[0]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
 
 testIfDocker(
   "hierarchical retrieval returns source from multiple files without uploading excluded data",
@@ -72,6 +148,65 @@ testIfDocker(
 );
 
 testIfDocker(
+  "excluded paths are never uploaded or returned",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-exclude-"));
+    const sent: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const body = (await request.json()) as { questions: Record<string, unknown> };
+        sent.push(JSON.stringify(body));
+        return Response.json({
+          answers: Object.fromEntries(
+            Object.keys(body.questions).map((id) => [id, { type: "noul", noul: 0.9 }]),
+          ),
+        });
+      },
+    });
+    try {
+      await mkdir(join(root, "src/generated"), { recursive: true });
+      await writeFile(
+        join(root, "src/events.ts"),
+        "export class Events { record(name:string) {return name;} }\n",
+      );
+      await writeFile(
+        join(root, "src/events.test.ts"),
+        'export const excludedTest = "DO_NOT_UPLOAD_TEST";\n',
+      );
+      await writeFile(
+        join(root, "src/generated/client.ts"),
+        'export const excludedClient = "DO_NOT_UPLOAD_GENERATED";\n',
+      );
+      const signal = new AbortController().signal;
+      const evaluator = createEvaluator({
+        apiKey: "fixture",
+        provider: "vercel",
+        fetch: routeProviderFetch(fetch, `http://127.0.0.1:${server.port}`),
+        signal,
+      });
+      const result = await retrieve(
+        {
+          root,
+          query: "research event recording",
+          policy: { exclude: ["*.test.ts", "src/generated/"] },
+          signal,
+        },
+        evaluator,
+      );
+      expect(result.status).toBe("complete");
+      expect(result.files.map((file) => file.path)).toEqual(["src/events.ts"]);
+      expect(sent.join("\n")).not.toContain("DO_NOT_UPLOAD");
+      expect(sent.join("\n")).not.toContain("generated");
+    } finally {
+      server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);
+
+testIfDocker(
   "newly ignored evidence is withheld from follow-up requests and returned excerpts",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "jg-ignore-change-"));
@@ -108,7 +243,9 @@ testIfDocker(
               }
             }
             if (state.selectedEvidence) followups.push(state);
-            return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+            return Object.fromEntries(
+              Object.keys(request.questions).map((id) => [id, /^q\d+$/.test(id) ? 0.8 : 0.9]),
+            );
           },
         },
       );
@@ -179,23 +316,27 @@ testIfDocker(
           get requests() {
             return calls;
           },
-          async evaluate(request) {
+          async evaluate(request, policy) {
+            await policy?.beforeAttempt?.();
             calls++;
             const state = request.state as { selectedEvidence?: Array<{ path: string }> };
             if (state.selectedEvidence) {
               followups++;
-              if (followups > 8 && state.selectedEvidence.some((entry) => entry.path === "0.ts"))
+              if (followups > 1 && state.selectedEvidence.some((entry) => entry.path === "0.ts"))
                 staleUploads++;
               if (!changed) {
                 changed = true;
                 await writeFile(join(root, ".ignore"), "0.ts\n");
               }
             }
-            return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+            return Object.fromEntries(
+              Object.keys(request.questions).map((id) => [id, /^q\d+$/.test(id) ? 0.8 : 0.9]),
+            );
           },
         },
       );
       expect(changed).toBe(true);
+      expect(followups).toBeGreaterThan(1);
       expect(staleUploads).toBe(0);
       expect(result.status).toBe("incomplete");
       expect(result.files.find((file) => file.path === "0.ts")?.excerpts).toEqual([]);
@@ -249,7 +390,7 @@ testIfDocker(
     try {
       await writeFile(
         join(root, "events.ts"),
-        Array.from({ length: 20 }, (_, i) => `export function event${i}() {return true;}\n`).join(
+        Array.from({ length: 400 }, (_, i) => `export function event${i}() {return true;}\n`).join(
           "",
         ),
       );
@@ -285,7 +426,7 @@ testIfDocker(
     try {
       await writeFile(
         join(root, "events.ts"),
-        Array.from({ length: 20 }, (_, i) => `export function event${i}() {return ${i};}\n`).join(
+        Array.from({ length: 400 }, (_, i) => `export function event${i}() {return ${i};}\n`).join(
           "",
         ),
       );
@@ -308,7 +449,7 @@ testIfDocker(
         .flatMap((file) => file.excerpts.map((excerpt) => excerpt.source))
         .join("\n");
       expect(source).toContain("function event0");
-      expect(source).not.toContain("function event19");
+      expect(source).not.toContain("function event399");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -441,4 +582,36 @@ testIfDocker(
     }
   },
   30_000,
+);
+
+testIfDocker(
+  "terminal refinement failures stop later files without discarding first-pass evidence",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-refinement-stop-"));
+    try {
+      for (const path of ["a.ts", "b.ts", "c.ts"])
+        await writeFile(join(root, path), "export function event() { return true; }\n");
+      let followups = 0;
+      const result = await retrieve(
+        { root, query: "event", signal: new AbortController().signal },
+        {
+          requests: 0,
+          async evaluate(request) {
+            if ((request.state as { selectedEvidence?: unknown }).selectedEvidence) {
+              followups++;
+              throw new EvaluationFailure("authentication");
+            }
+            return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.8]));
+          },
+        },
+      );
+      expect(followups).toBe(1);
+      expect(result.status).toBe("incomplete");
+      expect(result.files).toHaveLength(3);
+      expect(result.files.every((file) => file.selected.length > 0)).toBe(true);
+      expect(result.issues).toContainEqual({ kind: "authentication", count: 1 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
 );

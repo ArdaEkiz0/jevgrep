@@ -30,22 +30,30 @@ asset checks. [The build](build-cli.ts) copies the authored MIT license and
 [collects third-party notices](package-notices.mjs) from emitted bundle inputs.
 [Retained license sources](licenses/README.md) document upstream distribution gaps.
 The archive excludes test fixtures, evaluation evidence, node_modules directories, source maps,
-and unbundled development source. Authored Python helpers and the Node worker
+and unbundled development source. The parser worker, extraction code, and packaged grammars
 are required runtime assets and are included. Direct runtime parser dependencies
 install from exact npm pins; transitive dependencies resolve during npm installation.
+The registry-verification checkout installs locked development dependencies and
+runs [asset preparation](parser-assets.mjs) before comparing canonical grammar
+bytes and license notices with the downloaded archive.
 
 On an Apple Silicon Mac, run `node scripts/test-native.mjs` after the normal
 `bun install --frozen-lockfile` setup. This builds and packs the candidate, installs
 it with npm outside the checkout, and runs the credential-free commands and
-synthetic Python search against a loopback Gateway fixture. To verify an existing
+synthetic Python/Go/Rust searches against a loopback Gateway fixture. To verify an existing
 archive without Bun, use `node scripts/test-native.mjs --prebuilt /path/package.tgz`.
 The command prints the archive hash and actual Node/macOS runtime for retained
 evidence. It requires Node 22 or newer; a result proves the printed version only.
+
+The [Windows workflow](../.github/workflows/windows.yml) builds and installs an npm
+tarball in a temporary prefix, then runs portable suites against that installed
+CLI. It checks profile storage, protected-path exclusions, and the Windows
+installer launcher on the supported Node versions. POSIX-only fixtures remain
+in the Docker suites.
 
 Native installation uses temporary npm configuration, HOME, and XDG directories.
 The installed process receives a PATH containing only Node, so host Python, Bun,
 and compiler installations cannot satisfy runtime dependencies. All fixture
 credentials are synthetic, and local commands must make no Gateway requests.
-This bounded smoke complements the Docker suites; filesystem-policy tests still
-run only in their isolated Docker environment. npm installation needs network
+This bounded smoke complements the Docker and Windows suites. npm installation needs network
 access to resolve the exact runtime dependencies; search uses only loopback HTTP.

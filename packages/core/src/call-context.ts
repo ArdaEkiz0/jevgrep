@@ -1,4 +1,5 @@
-import { runPython } from "./python";
+import { runParser } from "./parser";
+import { resolveLanguage } from "./source";
 import type { Snapshot } from "./filesystem";
 import type { FileEvidence, Range } from "./types";
 type Call = Range & {
@@ -14,7 +15,7 @@ export async function localCallContext(
 ) {
   const original = file.presentationExcerpts ?? file.excerpts;
   if (
-    !/\.pyi?$/.test(snapshot.path) ||
+    resolveLanguage(snapshot.path, snapshot.source) !== "python" ||
     Buffer.byteLength(snapshot.source) > 1_000_000 ||
     file.sourceOmitted ||
     original.some((e) => e.partial || e.sourceByteStart !== undefined)
@@ -22,7 +23,7 @@ export async function localCallContext(
     return;
   const selected = file.selected.filter((r) => r.sourceByteStart === undefined);
   if (!selected.length) return;
-  const calls = await runPython<Call[]>(
+  const calls = await runParser<Call[]>(
     "calls",
     JSON.stringify({ source: snapshot.source, ranges: selected }),
     signal,

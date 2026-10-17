@@ -10,9 +10,17 @@ Preparation installs the packed npm artifact and dependencies once, then checks
 that same installation offline in every selected runtime image. Each check
 verifies the original source, agent versions and canonical packaged skill.
 The coding agent receives the archived prefix and runs the real `jg` executable
-on an internal network. The benchmark explicitly invokes `$jevgrep`, as required for the retrieval comparison;
-the retained skill begins by requiring retrieval. Retrieval limits come
+on an internal network. The benchmark prompt explicitly invokes `$jevgrep` and
+requires a natural-language search before implementation discovery. An inventory
+command does not satisfy that requirement. Prompt changes require a new frozen
+baseline protocol; historical plans retain their archived runner.
+The public skill itself teaches CLI usage without prescribing a research workflow. Retrieval limits come
 from the frozen package's default policy.
+
+New preparations use the current canonical `skills/jevgrep/SKILL.md` by default
+and reject a package carrying different skill bytes. Use `--skill` only for an
+explicitly identified comparison; existing frozen plans retain their original
+skill for reproducibility.
 
 The plan binds one package, installed prefix, skill, safe task export, evaluator
 dataset and archived runner/broker/registry sources before any treatment runs.
@@ -29,9 +37,22 @@ python3 evals/implementation/swebench/installed.py run \
 ```
 
 Preparation and dry-run make no model calls. `prepare` defaults to all ten tasks;
+`--jev-provider typesafe` selects native Jev for a separately identified provider
+experiment. Sol continues through Gateway. The broker holds both real credentials;
+the agent receives only its scoped broker token. Native Jev cost is estimated from recorded input usage at the documented
+list price frozen in the runner. Total task cost includes both Sol and Jev.
+Missing usage or incomplete transport coverage leaves that total unknown.
 `--task` selects one registered task. `--evidence-root` locates the retained
 baseline and evaluator files when preparing from another checkout. The root
 `eval:swebench` alias points to this entry point; `--help` lists its arguments.
+
+If a retained Docker image was removed, restore its pinned official base and
+archived toolchain, then prepare that one task with `--runtime-image` and the new
+immutable image ID. Preparation verifies the base image's filesystem layers,
+source identity, tool versions and installed skill. The frozen plan records both
+image IDs; baseline receipts remain untouched. Preserve the rebuild recipe and
+toolchain checksum verification beside the study and disclose the rebuild when
+reporting timing comparisons.
 
 After reviewing the frozen plan, `run --all` without `--dry-run` executes the paid
 treatments sequentially. Load the Gateway credential through the authorized
@@ -56,7 +77,8 @@ transport receipts, request/response files and valid cost fields. Missing or
 invalid evidence leaves the total unknown while preserving a known subtotal.
 Retained response costs still contribute to that subtotal when the transport log
 or a request-start entry is missing.
-These observations never enter the scored Sol task cost or change cost-win rules.
+Jev charges contribute to total task cost; they remain separate from the Sol
+component and its token counts.
 
 `aggregate --plan ...` reports official solves, protocol validity and billing for
 the selected tasks. It does not issue a promotion verdict. Unknown costs prevent
@@ -94,8 +116,8 @@ Receipts retain work, credited retrieval and wall durations plus the disjoint
 credit intervals and native command IDs, so timing remains auditable.
 
 The recognizer accepts a direct installed `jg` search, including the native shell
-wrapper. It gives no credit to auth, doctor, cache, skill, help/version, compound
-commands, redirections or shell expansions. Ambiguous invocations count as work.
+wrapper. It recognizes search exclusions and gives no credit to files, auth,
+doctor, cache, skill, help/version, compound commands, redirections or shell expansions. Ambiguous invocations count as work.
 Event-observation timestamps measure what the harness sees, not provider execution
 time; malformed timing events invalidate the timing evidence rather than inventing
 credit. Process startup and time outside qualifying waits count toward work.

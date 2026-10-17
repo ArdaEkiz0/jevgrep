@@ -13,6 +13,9 @@ import type { Evaluator, FileEvidence, ReadingLead, EvidenceRange } from "./type
 import type { Snapshot } from "./filesystem";
 type Span = { start: number; end: number };
 const sourceUnitBytes = 24_000;
+export const wholeFileContextBytes = 16_000;
+export const sourceBatchSize = 128;
+export const sourceConfidenceBoundary = 0.7;
 export type SelectionResult = {
   file: FileEvidence;
   declarations: Array<Pick<SourceUnit, "name" | "range">>;
@@ -146,10 +149,10 @@ export async function selectFile(
   for (const unit of units) {
     if (
       pending.length &&
-      (pending.length >= 8 ||
+      (pending.length >= sourceBatchSize ||
         Buffer.byteLength(
           lines.slice(pending[0]!.range.startLine - 1, unit.range.endLine).join("\n"),
-        ) > 14000)
+        ) > 42000)
     ) {
       groups.push(pending);
       pending = [];
@@ -158,7 +161,8 @@ export async function selectFile(
   }
   if (pending.length) groups.push(pending);
   let invalidated = false;
-  for (const group of groups) {
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+    const group = groups[groupIndex]!;
     try {
       const prepared = prepare ? await prepare() : {};
       if (prepared === null) {
@@ -183,7 +187,7 @@ export async function selectFile(
                   `Source lines ${unit.range.startLine}-${unit.range.endLine}; source bytes ${unit.sourceByteStart}-${unit.sourceByteEnd}:\n${sourceForUnit(snapshot, unit)}`,
               )
               .join("\n")
-          : bytes.length <= 16000
+          : bytes.length <= wholeFileContextBytes
             ? snapshot.source
             : `Opening context:\n${lines.slice(0, 20).join("\n")}\nSource lines ${first}-${last}:\n${lines.slice(first - 1, last).join("\n")}`;
       const request = evidenceRequest(
@@ -193,6 +197,13 @@ export async function selectFile(
         group.map((unit) => ({ name: unit.name, ...unit.range })),
         prepared.evidence,
       );
+      // Shared evidence contributes to the state limit as well as local source.
+      if (group.length > 1 && Buffer.byteLength(JSON.stringify(request.state)) > 80_000) {
+        const middle = Math.ceil(group.length / 2);
+        groups.splice(groupIndex, 1, group.slice(0, middle), group.slice(middle));
+        groupIndex--;
+        continue;
+      }
       const answers = await evaluator.evaluate(request);
       const values = group.map((unit, index) => {
         const values = [
@@ -349,7 +360,7 @@ export async function selectFile(
   // Presentation can be stricter without narrowing evidence sent to Jev.
   const displayed = mergeSpans(
     [...sourceDecisions.values()]
-      .filter((decision) => decision.score > 0.7)
+      .filter((decision) => decision.score > sourceConfidenceBoundary)
       .map((decision) => spanForRange(decision.range))
       .flatMap((span) =>
         chosen.flatMap((selectedSpan) => {

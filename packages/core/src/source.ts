@@ -1,5 +1,6 @@
 import ts from "typescript";
-import { runPython } from "./python.ts";
+import { basename, extname } from "node:path";
+import { runParser } from "./parser.ts";
 
 export type Range = { startLine: number; endLine: number };
 import type { Snapshot } from "./filesystem";
@@ -15,9 +16,32 @@ export type SourceUnit = {
 export type Inspection = {
   units: SourceUnit[];
   comments: Range[];
-  mode: "python" | "typescript" | "text";
+  mode: "python" | "typescript" | "go" | "rust" | "text";
   fallback?: "unsupported" | "syntax" | "size";
 };
+
+export function resolveLanguage(
+  path: string,
+  source: string,
+): "python" | "go" | "rust" | "TS" | "TSX" | "JS" | "JSX" | undefined {
+  if (/\.pyi?$/.test(path)) return "python";
+  if (path.endsWith(".tsx")) return "TSX";
+  if (path.endsWith(".jsx")) return "JSX";
+  if (/\.[cm]?js$/.test(path)) return "JS";
+  if (/\.[cm]?ts$/.test(path)) return "TS";
+  if (path.endsWith(".go")) return "go";
+  if (path.endsWith(".rs")) return "rust";
+  if (extname(path) !== "" || !source.startsWith("#!")) return;
+  const [program = "", ...args] = source.split("\n", 1)[0]!.slice(2).trim().split(/\s+/);
+  // env options, the operand of -u/-C/-P/-a and NAME=VALUE assignments come before the command.
+  const command = args.find(
+    (arg, index) =>
+      !arg.startsWith("-") && !arg.includes("=") && !/^-[uCPa]$/.test(args[index - 1] ?? ""),
+  );
+  const interpreter = basename(basename(program) === "env" ? (command ?? "") : program);
+  if (/^python(\d+(\.\d+)?)?$/.test(interpreter)) return "python";
+  if (interpreter === "node" || interpreter === "nodejs") return "JS";
+}
 
 type SourceText = { bytes: Buffer; offsets: number[]; lineCount: number };
 function sourceText(source: string): SourceText {
@@ -82,15 +106,17 @@ export async function inspect(
       "Source bounds must be integers; unit bytes at least 4 and parse bytes positive",
     );
   const { source, path } = snapshot;
+  const language = resolveLanguage(path, source);
   const text = sourceText(source);
   // Context windows use conservative whole-line Python comments, including inside multiline strings.
-  const pythonComments = /\.pyi?$/.test(path)
-    ? source
-        .split("\n")
-        .flatMap((line, index) =>
-          /^\s*#/.test(line) ? [{ startLine: index + 1, endLine: index + 1 }] : [],
-        )
-    : [];
+  const pythonComments =
+    language === "python"
+      ? source
+          .split("\n")
+          .flatMap((line, index) =>
+            /^\s*#/.test(line) ? [{ startLine: index + 1, endLine: index + 1 }] : [],
+          )
+      : [];
   const fallback = (reason: Inspection["fallback"]): Inspection => ({
     mode: "text",
     fallback: reason,
@@ -104,9 +130,9 @@ export async function inspect(
     comments: Range[] = [],
     mode: Inspection["mode"];
   let syntaxFallback = false;
-  if (/\.pyi?$/.test(path)) {
+  if (language === "python") {
     // A missing/incompatible packaged parser is a setup failure, never syntax fallback.
-    const parsed = await runPython<Array<Range & { name: string; ownerHeaders: Range[] }>>(
+    const parsed = await runParser<Array<Range & { name: string; ownerHeaders: Range[] }>>(
       "inspect",
       source,
       options.signal,
@@ -119,15 +145,14 @@ export async function inspect(
     }));
     comments = pythonComments;
     mode = "python";
-  } else if (/\.(?:[cm]?[jt]s|[jt]sx)$/.test(path)) {
-    const kind = path.endsWith(".tsx")
-      ? ts.ScriptKind.TSX
-      : path.endsWith(".jsx")
-        ? ts.ScriptKind.JSX
-        : /\.[cm]?js$/.test(path)
-          ? ts.ScriptKind.JS
-          : ts.ScriptKind.TS;
-    const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, kind);
+  } else if (language === "TS" || language === "TSX" || language === "JS" || language === "JSX") {
+    const file = ts.createSourceFile(
+      path,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind[language],
+    );
     syntaxFallback = !!(file as ts.SourceFile & { parseDiagnostics?: unknown[] }).parseDiagnostics
       ?.length;
     const line = (position: number) => file.getLineAndCharacterOfPosition(position).line + 1;
@@ -167,6 +192,16 @@ export async function inspect(
     };
     visit(file);
     mode = "typescript";
+  } else if (language === "go" || language === "rust") {
+    const parsed = await runParser<{ units: typeof units; comments: Range[] }>(
+      "declarations",
+      JSON.stringify({ source, language }),
+      options.signal,
+    );
+    if (!parsed) return fallback("syntax");
+    units = parsed.units;
+    comments = parsed.comments;
+    mode = language;
   } else return fallback("unsupported");
   comments = [...new Map(comments.map((r) => [`${r.startLine}:${r.endLine}`, r])).values()].sort(
     (a, b) => a.startLine - b.startLine,
@@ -189,8 +224,7 @@ export async function inspect(
     mode,
     comments,
     units: units.flatMap((unit) => {
-      // Frozen helpers report CPython line coordinates, while the caller slices on LF.
-      // Keep those coordinates even for CR-only source or an empty LF slice.
+      // Parser ranges and returned byte spans must remain tied to the original snapshot.
       const start = Math.min(
         text.bytes.length,
         text.offsets[unit.range.startLine - 1] ?? text.bytes.length,
@@ -224,9 +258,13 @@ export async function pythonNeighborhood(
   selected: Range[],
   signal?: AbortSignal,
 ): Promise<Range[]> {
-  if (!/\.pyi?$/.test(snapshot.path) || Buffer.byteLength(snapshot.source) > 1_000_000) return [];
+  if (
+    resolveLanguage(snapshot.path, snapshot.source) !== "python" ||
+    Buffer.byteLength(snapshot.source) > 1_000_000
+  )
+    return [];
   return (
-    (await runPython<Range[]>(
+    (await runParser<Range[]>(
       "neighborhood",
       JSON.stringify({ source: snapshot.source, ranges: selected }),
       signal,
@@ -255,7 +293,7 @@ export type SourcePreview = {
   parseUnavailable?: boolean;
   scope?: string;
 };
-/** The bundled preview helper handles Python declarations and generic text windows. */
+/** The preview worker handles Python declarations and generic text windows. */
 export async function pythonPreview(
   snapshot: Snapshot,
   query: string,
@@ -264,9 +302,14 @@ export async function pythonPreview(
 ): Promise<SourcePreview | null> {
   if (!Number.isSafeInteger(budget) || budget < 256)
     throw new Error("Preview allowance must be at least 256 bytes");
-  const result = await runPython<SourcePreview>(
+  const result = await runParser<SourcePreview>(
     "preview",
-    JSON.stringify({ text: snapshot.source, path: snapshot.path, query, budget }),
+    JSON.stringify({
+      text: snapshot.source,
+      language: resolveLanguage(snapshot.path, snapshot.source),
+      query,
+      budget,
+    }),
     signal,
   );
   if (result?.truncated) {

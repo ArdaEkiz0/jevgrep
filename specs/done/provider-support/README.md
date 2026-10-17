@@ -9,8 +9,9 @@ keeping retrieval behavior fixed.
 Coding agents should research code without managing provider routing. A human
 chooses a provider and key during `jg auth`, and ordinary search and doctor use
 that saved record until auth replaces it. This avoids ambiguous environment-key
-precedence and accidental provider fallback. Automation has one explicit path:
-`jg auth --provider NAME --stdin`.
+precedence and accidental provider fallback. Custom endpoints keep their base URL
+and model in that same saved record; see the [CLI guide](../../../apps/cli/README.md)
+for setup and gateway protocol requirements.
 
 The only compatibility exception is deliberate: a saved key without a provider
 still means Vercel. Reading it does not migrate or rewrite the file. Environment
@@ -25,6 +26,12 @@ This is a simpler setup contract, not a multi-account credential registry.
 - The application owns actual HTTP attempts, retries, shared rate-limit cooldown
   and cancellation. SDK retries remain disabled. The 50,000-attempt guard protects
   against runaway work; it is not an optimization budget.
+- TypeSafe throughput is paced by estimated input tokens and request starts,
+  independently of the concurrent-request ceiling. Reservations use conservative
+  payload bytes until reported usage is available. Queue waits happen before the
+  network timeout and source is revalidated after waiting. These budgets belong
+  to one search; other processes sharing the account can still cause rate limits,
+  so provider cooldowns remain authoritative.
 - Source freshness is checked before attempts and cached evidence use. An invalid
   provider answer is failure or incomplete discovery, never negative evidence.
 - Exact answer-cache identity separates provider, endpoint, model and protocol,
@@ -33,8 +40,9 @@ This is a simpler setup contract, not a multi-account credential registry.
 - Auth saves one private record atomically and never verifies a key over the
   network. Doctor checks separately with synthetic source. Keys never belong in
   chat or CLI output.
-- Tests route requests outside the product. There is no public endpoint/model
-  override or provider flag on search/doctor, and no automatic fallback.
+- Tests can route requests to fixtures without modifying saved production routing.
+  Custom endpoints are selected through auth; search and doctor have no routing
+  overrides or automatic fallback.
 
 The [preset owner](../../../packages/core/src/providers.ts),
 [evaluator](../../../packages/core/src/evaluator.ts), and

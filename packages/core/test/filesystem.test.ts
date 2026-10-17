@@ -1,4 +1,4 @@
-import { testIfDocker as test } from "../../../test/helpers/docker";
+import { posix, testIfDocker as test } from "../../../test/helpers/docker";
 import { afterEach, expect, spyOn } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm, symlink, chmod, open, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -86,7 +86,7 @@ test("pages advance past excluded entries, preserve unusual names, and release c
     skip1: "excluded",
     skip2: "excluded",
     "a.ts": "a",
-    "line\nbreak.ts": "b",
+    ...(posix ? { "line\nbreak.ts": "b" } : {}),
     "last.ts": "c",
   });
   const reader = await createFilesystem({ root, limits: { pageSize: 1, maxOpenDirectories: 1 } });
@@ -99,7 +99,7 @@ test("pages advance past excluded entries, preserve unusual names, and release c
       names.push(...page.entries.map((entry) => entry.path));
       cursor = page.nextCursor;
     } while (cursor);
-    expect(names.sort()).toEqual(["a.ts", "last.ts", "line\nbreak.ts"]);
+    expect(names.sort()).toEqual(["a.ts", "last.ts", ...(posix ? ["line\nbreak.ts"] : [])]);
     expect((await reader.listPage()).issues).toEqual([]);
   } finally {
     await reader.close();
@@ -155,28 +155,95 @@ test("policy overrides are independent and never admit protected storage or bina
   }
 });
 
+test("pages count skipped entries by reason and report file sizes", async () => {
+  const root = await fixture({
+    ".gitignore": "ignored.txt\n",
+    "ignored.txt": "ignored",
+    "node_modules/pkg.js": "dependency",
+    ".env": "secret",
+    "sized.ts": "12345",
+    "dir/inner.ts": "x",
+  });
+  const reader = await createFilesystem({ root });
+  try {
+    const page = await reader.listPage();
+    expect(page.entries.sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+      { path: "dir", kind: "directory" },
+      { path: "sized.ts", kind: "file", bytes: 5 },
+    ]);
+    expect(page.excluded).toEqual({ hidden: 2, ignored: 1, dependency: 1 });
+  } finally {
+    await reader.close();
+  }
+});
+
+test("exclude patterns only narrow eligibility, even with --no-ignore and repository negations", async () => {
+  const root = await fixture({
+    ".gitignore": "!keep.test.ts\n",
+    "src/app.ts": "application",
+    "src/app.test.ts": "test",
+    "keep.test.ts": "repository negation",
+    "admin/page.ts": "admin",
+    "admin/nested/deep.ts": "nested admin",
+    "docs/guide.md": "guide",
+  });
+  const reader = await createFilesystem({ root, policy: { exclude: ["*.test.ts", "admin/"] } });
+  try {
+    for (const path of ["src/app.ts", "docs/guide.md"])
+      expect(await reader.readSnapshot(path)).toMatchObject({ status: "ok" });
+    for (const path of ["src/app.test.ts", "keep.test.ts", "admin/page.ts", "admin/nested/deep.ts"])
+      expect(await reader.readSnapshot(path)).toMatchObject({
+        status: "excluded",
+        reason: "exclude_pattern",
+      });
+    expect((await reader.listPage()).entries.map((entry) => entry.path).sort()).toEqual([
+      "docs",
+      "src",
+    ]);
+  } finally {
+    await reader.close();
+  }
+  const unignored = await createFilesystem({
+    root,
+    policy: { noIgnore: true, exclude: ["docs/**"] },
+  });
+  try {
+    expect(await unignored.readSnapshot("docs/guide.md")).toMatchObject({
+      status: "excluded",
+      reason: "exclude_pattern",
+    });
+    expect(await unignored.readSnapshot("src/app.test.ts")).toMatchObject({ status: "ok" });
+  } finally {
+    await unignored.close();
+  }
+});
+
 test("root normalization does not follow descendant links or special files and permission errors stay issues", async () => {
   const root = await fixture({ visible: "ok", unreadable: "unreadable sentinel" });
   const outside = await fixture({ outside: "OUTSIDE_SENTINEL" });
-  await symlink(outside, join(root, "escape"));
-  await symlink(root, join(root, "cycle"));
-  await chmod(join(root, "unreadable"), 0);
-  const fifo = Bun.spawnSync(["mkfifo", join(root, "pipe")]);
-  expect(fifo.exitCode).toBe(0);
+  // POSIX ignores the type; Windows junctions need no symlink privilege.
+  await symlink(outside, join(root, "escape"), "junction");
+  await symlink(root, join(root, "cycle"), "junction");
+  if (posix) {
+    await chmod(join(root, "unreadable"), 0);
+    const fifo = Bun.spawnSync(["mkfifo", join(root, "pipe")]);
+    expect(fifo.exitCode).toBe(0);
+  }
   const reader = await createFilesystem({ root });
   try {
     for (const path of [
       "escape/outside",
       "cycle/visible",
-      "pipe",
+      ...(posix ? ["pipe"] : []),
       "../outside",
       join(outside, "outside"),
     ])
       expect(await reader.readSnapshot(path)).toMatchObject({ status: "excluded" });
-    expect(await reader.readSnapshot("unreadable")).toMatchObject({
-      status: "issue",
-      issue: { kind: "unreadable" },
-    });
+    if (posix)
+      expect(await reader.readSnapshot("unreadable")).toMatchObject({
+        status: "issue",
+        issue: { kind: "unreadable" },
+      });
     expect(await reader.readSnapshot("visible")).toMatchObject({ status: "ok" });
   } finally {
     await reader.close();
@@ -315,7 +382,7 @@ test("one reader observes same-size ignore edits with restored timestamps and re
 test("protected storage remains excluded when explicit root resolves through its alias", async () => {
   const store = await fixture({ credential: "NEVER_UPLOAD" });
   const root = await fixture({});
-  await symlink(store, join(root, "alias"));
+  await symlink(store, join(root, "alias"), "junction");
   const reader = await createFilesystem({
     root: store,
     protectedPaths: [join(root, "alias")],
@@ -359,6 +426,12 @@ test("valid UTF-8 control-byte binary and invalid UTF-8 remain excluded under ev
     control: new Uint8Array([1, 2, 3]),
     invalid: new Uint8Array([255]),
     plain: "one\ttwo\r\nthree\f",
+    unicode: "雪 café 😀",
+    ...Object.fromEntries(
+      [...Array.from({ length: 32 }, (_, code) => code), 127]
+        .filter((code) => ![9, 10, 12, 13].includes(code))
+        .map((code) => [`control-${code}`, new Uint8Array([65, code, 66])]),
+    ),
   });
   const reader = await createFilesystem({
     root,
@@ -368,6 +441,17 @@ test("valid UTF-8 control-byte binary and invalid UTF-8 remain excluded under ev
     expect(await reader.readSnapshot("control")).toMatchObject({
       status: "excluded",
       reason: "binary",
+    });
+    for (const code of [...Array.from({ length: 32 }, (_, code) => code), 127]) {
+      if ([9, 10, 12, 13].includes(code)) continue;
+      expect(await reader.readSnapshot(`control-${code}`)).toMatchObject({
+        status: "excluded",
+        reason: "binary",
+      });
+    }
+    expect(await reader.readSnapshot("unicode")).toMatchObject({
+      status: "ok",
+      snapshot: { source: "雪 café 😀" },
     });
     expect(await reader.readSnapshot("invalid")).toMatchObject({
       status: "excluded",

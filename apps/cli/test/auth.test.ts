@@ -1,7 +1,52 @@
 import { expect } from "bun:test";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { testInDocker, withCli } from "./cli";
+import { posix, testInDocker, withCli } from "./cli";
+
+if (!posix)
+  testInDocker(
+    "Windows profile storage is used by auth and always excluded from inventory",
+    async () => {
+      await withCli(async ({ home, run }) => {
+        const env = {
+          XDG_CONFIG_HOME: "",
+          XDG_CACHE_HOME: "",
+          APPDATA: join(home, "roaming"),
+          LOCALAPPDATA: join(home, "local"),
+        };
+        const auth = await run(
+          ["auth", "--provider", "vercel", "--stdin"],
+          "profile-secret\n",
+          env,
+        );
+        expect(auth).toMatchObject({ code: 0, stderr: "" });
+        expect(
+          JSON.parse(await readFile(join(env.APPDATA, "jevgrep/credentials.json"), "utf8")),
+        ).toEqual({
+          provider: "vercel",
+          apiKey: "profile-secret",
+        });
+        await mkdir(join(env.LOCALAPPDATA, "jevgrep"), { recursive: true });
+        await writeFile(join(env.LOCALAPPDATA, "jevgrep/answer.json"), "cached answer");
+        await writeFile(join(home, "visible.py"), "def visible(): pass\n");
+        const inventory = await run(
+          [
+            "files",
+            ".",
+            "--hidden",
+            "--no-ignore",
+            "--include-dependencies",
+            "--include-sensitive",
+          ],
+          "",
+          env,
+        );
+        expect(inventory).toMatchObject({ code: 0, stderr: "" });
+        expect(inventory.stdout).toContain("Jevgrep files: 1 file eligible");
+        expect(inventory.stdout).toContain('"protected" 2');
+      });
+    },
+  );
 
 testInDocker("installed auth saves privately, bounds stdin, and never echoes keys", async () => {
   await withCli(async ({ home, run }) => {
@@ -15,8 +60,10 @@ testInDocker("installed auth saves privately, bounds stdin, and never echoes key
       provider: "vercel",
       apiKey: "test-gateway-secret",
     });
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(home, "jevgrep"))).mode & 0o777).toBe(0o700);
+    if (posix) {
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(home, "jevgrep"))).mode & 0o777).toBe(0o700);
+    }
     const whitespace = await run(["auth", "--provider", "vercel", "--stdin"], "two secrets\n");
     expect(whitespace.code).toBe(1);
     expect(whitespace.stderr).toBe("");
@@ -31,3 +78,201 @@ testInDocker("installed auth saves privately, bounds stdin, and never echoes key
     });
   });
 });
+
+for (const [label, input] of [
+  ["NUL", "invalid-fake\0secret\n"],
+  ["non-Latin-1", "invalid-fake☃secret\n"],
+  ["control character", "invalid-fake\x01secret\n"],
+  ["DEL", "invalid-fake\x7fsecret\n"],
+  ["malformed UTF-8", Buffer.concat([Buffer.from("invalid-fake"), Buffer.from([0xff])])],
+] as const) {
+  testInDocker(`auth rejects ${label} without replacing saved credentials`, async () => {
+    await withCli(async ({ home, run }) => {
+      const directory = join(home, "jevgrep");
+      const file = join(directory, "credentials.json");
+      const original = '{ "provider": "vercel", "apiKey": "existing-fake-secret" }\n';
+      await mkdir(directory, { recursive: true });
+      await writeFile(file, original);
+      const result = await run(["auth", "--provider", "vercel", "--stdin"], input);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("API key");
+      expect(result.stdout).not.toContain("invalid-fake");
+      expect(result.stdout).not.toContain("existing-fake-secret");
+      expect(await readFile(file, "utf8")).toBe(original);
+    });
+  });
+}
+
+testInDocker("auth accepts a Latin-1 key and trims surrounding whitespace", async () => {
+  await withCli(async ({ home, run }) => {
+    const key = "fake-latin-é-secret";
+    const result = await run(["auth", "--provider", "vercel", "--stdin"], ` \t${key}\r\n`);
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(result.stdout).toContain("key saved");
+    expect(result.stdout).not.toContain(key);
+    expect(JSON.parse(await readFile(join(home, "jevgrep", "credentials.json"), "utf8"))).toEqual({
+      provider: "vercel",
+      apiKey: key,
+    });
+  });
+});
+
+testInDocker(
+  "custom auth saves the endpoint and doctor verifies it without echoing the key",
+  async () => {
+    const requests: Array<{ path: string; authorization: string; body: Record<string, unknown> }> =
+      [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        requests.push({
+          path: new URL(request.url).pathname,
+          authorization: request.headers.get("authorization") ?? "",
+          body: (await request.json()) as Record<string, unknown>,
+        });
+        return Response.json({ answers: { relevant: { type: "noul", noul: 0.9 } } });
+      },
+    });
+    try {
+      await withCli(async ({ home, run }) => {
+        const key = "custom-endpoint-secret";
+        const baseURL = `http://127.0.0.1:${server.port}/typesafe/v1`;
+        const auth = await run(
+          [
+            "auth",
+            "--provider",
+            "custom",
+            "--base-url",
+            baseURL,
+            "--model",
+            "gateway/jev-2",
+            "--stdin",
+          ],
+          `${key}\n`,
+        );
+        expect(auth.code).toBe(0);
+        expect(auth.stderr).toBe("");
+        expect(auth.stdout).toContain(`Custom endpoint (127.0.0.1:${server.port})`);
+        expect(auth.stdout).toContain("key saved");
+        expect(auth.stdout).not.toContain(key);
+        const file = join(home, "jevgrep", "credentials.json");
+        expect(JSON.parse(await readFile(file, "utf8"))).toEqual({
+          provider: "custom",
+          baseURL,
+          model: "gateway/jev-2",
+          apiKey: key,
+        });
+        if (posix) {
+          expect((await stat(file)).mode & 0o777).toBe(0o600);
+          expect((await stat(join(home, "jevgrep"))).mode & 0o777).toBe(0o700);
+        }
+        expect(requests).toHaveLength(0);
+
+        const doctor = await run(["doctor"]);
+        expect(doctor.code).toBe(0);
+        expect(doctor.stderr).toBe("");
+        expect(doctor.stdout).toContain(`Custom endpoint (127.0.0.1:${server.port})`);
+        expect(doctor.stdout).not.toContain(key);
+        expect(requests).toHaveLength(1);
+        expect(requests[0]!.path).toBe("/typesafe/v1/systemone");
+        expect(requests[0]!.authorization).toBe(`Bearer ${key}`);
+        expect(requests[0]!.body.model).toBe("gateway/jev-2");
+        expect(Object.keys(requests[0]!.body.questions as object)).toEqual(["relevant"]);
+      });
+    } finally {
+      server.stop(true);
+    }
+  },
+);
+
+testInDocker("custom auth rejects insecure or incomplete endpoints before saving", async () => {
+  await withCli(async ({ home, run }) => {
+    const file = join(home, "jevgrep", "credentials.json");
+    for (const [args, expected] of [
+      [
+        [
+          "auth",
+          "--provider",
+          "custom",
+          "--base-url",
+          "http://gateway.example.com/v1",
+          "--model",
+          "jev",
+          "--stdin",
+        ],
+        "https://",
+      ],
+      [
+        [
+          "auth",
+          "--provider",
+          "custom",
+          "--base-url",
+          "ftp://gateway.example.com/v1",
+          "--model",
+          "jev",
+          "--stdin",
+        ],
+        "Base URL",
+      ],
+      [
+        [
+          "auth",
+          "--provider",
+          "custom",
+          "--base-url",
+          "https://gateway.example.com/v1",
+          "--model",
+          "two words",
+          "--stdin",
+        ],
+        "model ID",
+      ],
+      [
+        ["auth", "--provider", "custom", "--base-url", "https://gateway.example.com/v1", "--stdin"],
+        "--model",
+      ],
+      [
+        ["auth", "--provider", "vercel", "--base-url", "https://gateway.example.com/v1", "--stdin"],
+        "custom",
+      ],
+    ] as const) {
+      const result = await run([...args], "rejected-endpoint-secret\n");
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(expected);
+      expect(result.stdout).not.toContain("rejected-endpoint-secret");
+    }
+    expect(await readFile(file, "utf8").catch(() => null)).toBeNull();
+    const piped = await run(["auth"], "piped-secret\n");
+    expect(piped.code).toBe(1);
+    expect(piped.stdout).toContain("custom");
+    expect(piped.stdout).not.toContain("piped-secret");
+  });
+});
+
+testInDocker(
+  "doctor rejects a persisted custom endpoint that violates the transport rule",
+  async () => {
+    await withCli(async ({ home, run }) => {
+      const directory = join(home, "jevgrep");
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(
+        join(directory, "credentials.json"),
+        JSON.stringify({
+          provider: "custom",
+          baseURL: "http://gateway.example.com/v1",
+          model: "gateway/jev-2",
+          apiKey: "stored-endpoint-secret",
+        }),
+      );
+      const doctor = await run(["doctor"]);
+      expect(doctor.code).toBe(1);
+      expect(doctor.stderr).toBe("");
+      expect(doctor.stdout).toContain("Could not read valid credentials");
+      expect(doctor.stdout).not.toContain("stored-endpoint-secret");
+      expect(doctor.stdout).not.toContain("gateway.example.com");
+    });
+  },
+);

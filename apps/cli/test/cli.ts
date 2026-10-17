@@ -4,20 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const testInDocker = process.env.JEVGREP_TEST_IN_DOCKER === "1" ? test : test.skip;
+export { posix, testIfDockerPosix as testInDockerPosix } from "../../../test/helpers/docker";
 
 export async function withCli(
   runTest: (context: {
     home: string;
     run: (
       args: string[],
-      input?: string,
+      input?: string | Buffer,
       env?: NodeJS.ProcessEnv,
     ) => Promise<{ stdout: string; stderr: string; code: number }>;
   }) => Promise<void>,
 ) {
   const home = await mkdtemp(join(tmpdir(), "jevgrep-cli-"));
   const cli = process.env.JEVGREP_TEST_CLI ?? join(import.meta.dir, "../dist/bin/index.js");
-  const run = async (args: string[], input = "", env: NodeJS.ProcessEnv = {}) => {
+  const run = async (args: string[], input: string | Buffer = "", env: NodeJS.ProcessEnv = {}) => {
     const child = Bun.spawn(["node", cli, ...args], {
       cwd: home,
       env: {

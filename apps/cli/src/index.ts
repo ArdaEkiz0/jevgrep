@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import { authenticate, configDirectory, loadCredentials } from "./auth";
-import { providers } from "@repo/core/providers";
+import { authenticate, loadCredentials } from "./auth";
+import { endpointFor } from "@repo/core/providers";
+import { storageDirectory } from "@repo/core/storage";
 import { help, parseCommand } from "./args";
 import { CliError } from "./errors";
-import { renderResult } from "./render";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { renderInventory, renderResult } from "./render";
+import { stat } from "node:fs/promises";
 import { version } from "../package.json";
 import { installSkill } from "./skill";
 
@@ -32,10 +32,6 @@ async function write(text: string) {
   });
 }
 
-function cacheDirectory() {
-  return join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "jevgrep");
-}
-
 async function main() {
   const command = parseCommand(process.argv.slice(2));
   switch (command.kind) {
@@ -47,10 +43,10 @@ async function main() {
       process.exitCode = await installSkill(command, controller.signal);
       return;
     case "auth":
-      return authenticate(command.provider, controller.signal);
+      return authenticate(command, controller.signal);
     case "cache-clear": {
       const { createEvaluationCache } = await import("@repo/core");
-      const cache = createEvaluationCache({ directory: cacheDirectory() });
+      const cache = createEvaluationCache({ directory: storageDirectory("cache") });
       await cache.clear();
       if (cache.stats().issues.length)
         throw new CliError("Could not completely clear the cache. Check its permissions.");
@@ -58,6 +54,7 @@ async function main() {
     }
     case "doctor": {
       const credentials = await loadCredentials();
+      const endpoint = endpointFor(credentials);
       const { createEvaluator, EvaluationFailure } = await import("@repo/core");
       const evaluator = createEvaluator({
         ...credentials,
@@ -75,36 +72,53 @@ async function main() {
         });
         if (!(answers.relevant! > 0.5))
           throw new CliError(
-            `${providers[credentials.provider].label} returned an unexpected answer to the connection check.`,
+            `${endpoint.label} returned an unexpected answer to the connection check.`,
           );
-        await write(`Jev connection verified through ${providers[credentials.provider].label}.\n`);
+        await write(`Jev connection verified through ${endpoint.label}.\n`);
       } catch (error) {
         if (error instanceof CliError) throw error;
         if (error instanceof EvaluationFailure && error.diagnostic) {
           const { statusCode, message } = error.diagnostic;
           throw new CliError(
-            `Jev connection check failed through ${providers[credentials.provider].label} (HTTP ${statusCode}).\n` +
+            `Jev connection check failed through ${endpoint.label} (HTTP ${statusCode}).\n` +
               (message
                 ? `Provider: ${message}`
                 : "Check your saved key, model access, and provider billing."),
           );
         }
         throw new CliError(
-          `Jev connection check failed through ${providers[credentials.provider].label}. Check your saved key, model access, and network.`,
+          `Jev connection check failed through ${endpoint.label}. Check your saved key, model access, and network.`,
         );
       }
+      return;
+    }
+    case "files": {
+      if (!(await stat(command.root).catch(() => undefined))?.isDirectory())
+        throw new CliError("The root must be an existing directory.");
+      const { inventory } = await import("@repo/core");
+      const result = await inventory({
+        root: command.root,
+        includePaths: command.list,
+        policy: command.policy,
+        signal: controller.signal,
+      });
+      if (pipeClosed) return;
+      await write(renderInventory(result));
+      process.exitCode =
+        result.status === "interrupted" ? 130 : result.status === "incomplete" ? 2 : 0;
       return;
     }
     case "search": {
       const credentials = await loadCredentials();
       const { retrieve, createEvaluator, createEvaluationCache } = await import("@repo/core");
       const cache = createEvaluationCache({
-        directory: cacheDirectory(),
+        directory: storageDirectory("cache"),
         enabled: !command.noCache,
       });
       const evaluator = createEvaluator({
         cache,
         concurrency: command.concurrency,
+        requestLimit: command.maxRequests,
         policyVersion: JSON.stringify(command.policy),
         ...credentials,
         signal: controller.signal,
@@ -115,12 +129,11 @@ async function main() {
           query: command.query,
           policy: command.policy,
           signal: controller.signal,
-          protectedPaths: [configDirectory(), cacheDirectory()],
         },
         evaluator,
       );
       if (pipeClosed) return;
-      await write(renderResult(result, command.maxSourceBytes));
+      await write(renderResult(result, command.maxSourceBytes, command.maxOutputBytes));
       process.exitCode =
         result.status === "interrupted" ? 130 : result.status === "incomplete" ? 2 : 0;
     }

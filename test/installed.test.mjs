@@ -184,7 +184,9 @@ async function context(t, mode = "healthy", executable = binary) {
         probabilities = body.state.items.map((item) =>
           mode === "negative"
             ? 0.05
-            : item.kind === "directory" || item.path.endsWith(".py")
+            : item.kind === "directory" ||
+                item.path.endsWith(".py") ||
+                (mode === "symbol-labels" && item.path.endsWith(".ts"))
               ? 0.95
               : 0.05,
         );
@@ -203,7 +205,11 @@ async function context(t, mode = "healthy", executable = binary) {
           assert.ok(declaration, `Missing declaration for ${id}`);
           assert.ok(Number.isInteger(declaration.startLine) && declaration.startLine >= 1);
           assert.ok(declaration.endLine >= declaration.startLine);
-          return match[1] === "scope" || declaration.name.endsWith(".record_event") ? 0.95 : 0.05;
+          return match[1] === "scope" ||
+            declaration.name.endsWith(".record_event") ||
+            (mode === "symbol-labels" && declaration.name.includes("recordEvent"))
+            ? 0.95
+            : 0.05;
         });
       } else if (Object.hasOwn(body.questions, "implementation")) {
         probabilities = Object.keys(body.questions).map((name) =>
@@ -412,6 +418,29 @@ test("installed local commands match the package without credentials", async (t)
   const version = await fixture.run(["--version"], noCredentials);
   assert.equal(version.code, 0, version.stdout);
   assert.equal(version.stdout, `${metadata.version}\n`);
+  await mkdir(join(fixture.tree, "config"));
+  await writeFile(join(fixture.tree, "terraform.tfvars"), "db_password = synthetic");
+  await writeFile(join(fixture.tree, "config/database.yml"), "password: synthetic");
+  await writeFile(join(fixture.tree, "line\nbreak\u001b[31m.ts"), "export const x = 1;");
+  const summary = await fixture.run(["files", fixture.tree], noCredentials);
+  assert.equal(summary.code, 0, summary.stdout);
+  assert.doesNotMatch(summary.stdout, /terraform\.tfvars|config\/database\.yml/);
+  const listed = await fixture.run(["files", fixture.tree, "--list"], noCredentials);
+  assert.equal(listed.code, 0, listed.stdout);
+  assert.match(listed.stdout, /^- "terraform\.tfvars"$/m);
+  assert.match(listed.stdout, /^- "config\/database\.yml"$/m);
+  assert.ok(listed.stdout.includes('- "line\\nbreak\\u001b[31m.ts"'));
+  assert.ok(!listed.stdout.includes("\u001b"));
+  assert.equal(
+    listed.stdout.split("Eligible paths:")[0],
+    summary.stdout.split("\n\nEnd files.")[0] + "\n",
+  );
+  const narrowed = await fixture.run(
+    ["files", fixture.tree, "--list", "--exclude", "*.tfvars", "--exclude", "config/"],
+    noCredentials,
+  );
+  assert.equal(narrowed.code, 0, narrowed.stdout);
+  assert.doesNotMatch(narrowed.stdout, /terraform\.tfvars|config\/database\.yml/);
   assert.equal(
     await readFile(join(packageDirectory, "dist/skills/jevgrep/SKILL.md"), "utf8"),
     await readFile(expectedSkill, "utf8"),
@@ -469,6 +498,73 @@ test("skill command delegates installation to npx without credentials", async (t
   assert.match(unavailable.stdout, /requires npx/);
 });
 
+test("installed Go/Rust search indexes late methods and selects their source instead of distant noise", async (t) => {
+  const fixture = await context(t, async ({ body, response }) => {
+    const answers = Object.fromEntries(
+      Object.keys(body.questions).map((id) => {
+        const match = /^(q|scope|ref)(\d+)$/.exec(id);
+        const selected =
+          body.state.declarations && match
+            ? match[1] === "scope" ||
+              (match[1] === "q" &&
+                body.state.declarations[Number(match[2])].name.endsWith(".record_event"))
+            : !id.startsWith("ref");
+        return [id, { type: "noul", noul: selected ? 0.95 : 0.05 }];
+      }),
+    );
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ answers }));
+    return true;
+  });
+  const files = [
+    [
+      "sample.go",
+      "package sample\n" +
+        Array.from(
+          { length: 160 },
+          (_, i) => `func noise${i}() string { return "DISTANT_NOISE_${i}_${"x".repeat(100)}" }\n`,
+        ).join("") +
+        'type Box struct {}\nfunc (b *Box) record_event() string { return "go-evidence" }\n',
+      "go-evidence",
+    ],
+    [
+      "sample.rs",
+      Array.from(
+        { length: 160 },
+        (_, i) => `fn noise${i}() -> &'static str { "DISTANT_NOISE_${i}_${"x".repeat(100)}" }\n`,
+      ).join("") +
+        'struct Box;\n#[allow(dead_code)]\nimpl Box {\n #[inline]\n pub fn record_event(&self) -> &str { "rust-evidence" }\n}\n',
+      "rust-evidence",
+    ],
+  ];
+  for (const [path, source] of files) await writeFile(join(fixture.tree, path), source);
+  const result = await fixture.run([query, fixture.tree, "--no-cache"]);
+  assert.equal(result.code, 0, result.stdout);
+  for (const [path, , marker] of files) {
+    assert.ok(
+      fixture.requests.some(
+        ({ body }) =>
+          body.state.path === path &&
+          body.state.preview?.truncated &&
+          body.state.preview.declarations?.some((d) => d.name === "Box.record_event"),
+      ),
+      `Missing late-method preview for ${path}`,
+    );
+    assert.ok(
+      fixture.requests.some(
+        ({ body }) =>
+          body.state.path === path &&
+          body.state.declarations?.some((d) => d.name === "Box.record_event"),
+      ),
+      `Missing named selection for ${path}`,
+    );
+    assert.ok(result.stdout.includes(marker), result.stdout);
+  }
+  assert.ok(result.stdout.includes("#[allow(dead_code)]"), result.stdout);
+  assert.ok(result.stdout.includes("#[inline]"), result.stdout);
+  assert.ok(!result.stdout.includes("DISTANT_NOISE_0_"), result.stdout);
+});
+
 test("actual installed search parses Python and returns every relevant hierarchy branch", async (t) => {
   const fixture = await context(t);
   const result = await fixture.run([query, fixture.tree, "--no-cache"]);
@@ -498,6 +594,25 @@ test("actual installed search parses Python and returns every relevant hierarchy
   );
 });
 
+test("installed search keeps multiline TypeScript declaration labels on one output line", async (t) => {
+  const fixture = await context(t, "symbol-labels");
+  await rm(fixture.tree, { recursive: true });
+  await mkdir(fixture.tree);
+  await writeFile(
+    join(fixture.tree, "events.ts"),
+    "const {\n  recordEvent,\n  flush\n} = createCollector();\n",
+  );
+  const result = await fixture.run([query, "--no-cache"]);
+  assert.equal(result.code, 0, result.stdout);
+  assert.match(result.stdout, /^  "\{\\n  recordEvent,\\n  flush\\n\}"@1-4$/m);
+  assert.equal(result.stdout.match(/^End context\.$/gm)?.length, 1);
+  assert.ok(
+    fixture.requests.some(({ body }) =>
+      body.state.declarations?.some((declaration) => declaration.name.includes("recordEvent")),
+    ),
+  );
+});
+
 test("search concurrency limits all stages against a busy provider", async (t) => {
   let active = 0;
   let peak = 0;
@@ -510,7 +625,8 @@ test("search concurrency limits all stages against a busy provider", async (t) =
       response.end(JSON.stringify({ error: "Too many concurrent calls" }));
       return true;
     }
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Keep every stage busy; the first source check may run during navigation.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     return false;
   });
   complete(await fixture.run([query, fixture.tree, "--concurrency", "2", "--no-cache"]));
@@ -976,27 +1092,54 @@ test("source budget preserves every file and lead while explicitly omitting sour
   assertCachedRequestsAreReused(fixture.requests, before);
 });
 
-test("missing or corrupt packaged Python assets fail closed without downloads", async (t) => {
+test("missing or corrupt packaged parser assets fail closed without downloads", async (t) => {
   const scratch = await mkdtemp(join(tmpdir(), "jg-missing-python-"));
   t.after(() => rm(scratch, { recursive: true, force: true }));
-  for (const [asset, corrupt] of [
-    ["dist/bin/python-worker.mjs", false],
-    ["dist/assets/python/inspect.py", false],
-    ["node_modules/pyodide/pyodide.asm.wasm", false],
-    ["node_modules/pyodide/python_stdlib.zip", false],
-    ["node_modules/pyodide/pyodide.asm.wasm", true],
+  for (const [asset, corrupt, extension] of [
+    ["dist/bin/parser-worker.mjs", false],
+    ["dist/assets/tree-sitter/tree-sitter-python.wasm", false],
+    ["node_modules/web-tree-sitter/web-tree-sitter.wasm", false],
+    ["dist/assets/tree-sitter/tree-sitter-python.wasm", true],
+    ["dist/assets/tree-sitter/tree-sitter-go.wasm", false, "go"],
+    ["dist/assets/tree-sitter/tree-sitter-go.wasm", true, "go"],
+    ["dist/assets/tree-sitter/tree-sitter-rust.wasm", false, "rs"],
+    ["dist/assets/tree-sitter/tree-sitter-rust.wasm", true, "rs"],
   ]) {
     const copy = join(scratch, "package");
     await cp(packageDirectory, copy, { recursive: true, dereference: true });
     await access(join(copy, asset));
     if (corrupt) await writeFile(join(copy, asset), "corrupt runtime fixture");
     else await rm(join(copy, asset));
-    const fixture = await context(t, "healthy", join(copy, "dist/bin/index.js"));
+    const fixture = await context(
+      t,
+      extension
+        ? async ({ body, response }) => {
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(
+              JSON.stringify({
+                answers: Object.fromEntries(
+                  Object.keys(body.questions).map((id) => [id, { type: "noul", noul: 0.95 }]),
+                ),
+              }),
+            );
+            return true;
+          }
+        : "healthy",
+      join(copy, "dist/bin/index.js"),
+    );
+    if (extension)
+      await writeFile(
+        join(fixture.tree, `broken.${extension}`),
+        extension === "go" ? "package sample\nfunc record_event() {}\n" : "fn record_event() {}\n",
+      );
     const result = await fixture.run([query, fixture.tree, "--no-cache"]);
     assert.equal(result.code, 1, `${asset} (corrupt=${corrupt}): ${result.stdout}`);
     assert.ok(result.stdout.trim(), "Asset failure must produce a diagnostic");
     assert.ok(
-      !fixture.requests.some(({ body }) => body.state.declarations),
+      !fixture.requests.some(
+        ({ body }) =>
+          body.state.declarations && (!extension || body.state.path === `broken.${extension}`),
+      ),
       "Unavailable parser assets must not fabricate declaration evidence",
     );
     await fixture.removeCredentials();
@@ -1051,7 +1194,7 @@ test("installed queued freshness withholds excluded source uploads", async (t) =
         await new Promise((resolve) => {
           releases.push(resolve);
           if (releases.length === 8)
-            void writeFile(join(tree, ".ignore"), "large.txt\n").then(() =>
+            void writeFile(join(tree, ".ignore"), "large-*.txt\n").then(() =>
               releases.forEach((release) => release()),
             );
         });
@@ -1069,10 +1212,11 @@ test("installed queued freshness withholds excluded source uploads", async (t) =
   t.after(() => releases.forEach((release) => release()));
   await rm(fixture.tree, { recursive: true });
   await mkdir(fixture.tree);
-  await writeFile(
-    join(fixture.tree, "large.txt"),
-    "QUEUED_INSTALLED_SENTINEL line\n".repeat(18000),
-  );
+  for (let index = 0; index < 48; index++)
+    await writeFile(
+      join(fixture.tree, `large-${index}.txt`),
+      "QUEUED_INSTALLED_SENTINEL line\n".repeat(800),
+    );
   // Fill every provider slot before changing the policy, leaving later uploads queued.
   const result = await fixture.run([query, fixture.tree, "--concurrency", "8", "--no-cache"]);
   assert.equal(uploads, 8);

@@ -1,6 +1,6 @@
 {
   "name": "@dzhng/jevgrep",
-  "version": "0.4.2",
+  "version": "0.8.0",
   "description": "Content-aware source retrieval for coding agents",
   "license": "MIT",
   "repository": {
@@ -16,7 +16,8 @@
   ],
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "type": "module",
   "publishConfig": {
@@ -29,8 +30,8 @@
     "test": "bun test test"
   },
   "dependencies": {
-    "pyodide": "0.25.1",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "web-tree-sitter": "0.27.0"
   },
   "devDependencies": {
     "@clack/prompts": "1.8.1",
