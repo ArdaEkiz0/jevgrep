@@ -195,7 +195,9 @@ Malformed/missing answers remain unknown. Healthy negative evaluations may be
 cached; failed or incomplete answers may not. Partial provider failures preserve
 other useful evidence and are summarized by kind/count, not negative-path lists.
 
-Default cache directory: `$XDG_CACHE_HOME/jevgrep`, else `~/.cache/jevgrep`.
+XDG config and cache overrides are honored only when their values are absolute;
+relative values are ignored. Default cache directory: `$XDG_CACHE_HOME/jevgrep`,
+else `~/.cache/jevgrep`.
 Keep source and credentials out of cache payloads: store content-derived keys and
 validated answers, not full source packets. Hash the exact native semantic request
 including query, source, path/context, ordered questions, model/provider identity,
