@@ -25,9 +25,7 @@ test("flags the four secret shapes from jevgrep#51", () => {
 
 test("flags yaml-style secrets and bearer tokens", () => {
   expect(containsLikelySecret(`database:\n  password: "${FAKE_PASSWORD}"\n`)).toBe(true);
-  expect(
-    containsLikelySecret(`headers:\n  authorization: Bearer ${FAKE_GITHUB}\n`),
-  ).toBe(true);
+  expect(containsLikelySecret(`headers:\n  authorization: Bearer ${FAKE_GITHUB}\n`)).toBe(true);
 });
 
 test("ignores placeholders, short and low-entropy values", () => {
@@ -41,14 +39,14 @@ test("ignores placeholders, short and low-entropy values", () => {
 
 test("ignores ordinary code that merely mentions key-like words", () => {
   expect(
-    containsLikelySecret(`const token = getToken();\nfunction authenticate(token) {\n  return token;\n}\n`),
+    containsLikelySecret(
+      `const token = getToken();\nfunction authenticate(token) {\n  return token;\n}\n`,
+    ),
   ).toBe(false);
-  expect(
-    containsLikelySecret(`// Set your api_key in the config file before running.\n`),
-  ).toBe(false);
-  expect(
-    containsLikelySecret(`# The password field is required by the login form.\n`),
-  ).toBe(false);
+  expect(containsLikelySecret(`// Set your api_key in the config file before running.\n`)).toBe(
+    false,
+  );
+  expect(containsLikelySecret(`# The password field is required by the login form.\n`)).toBe(false);
   expect(
     containsLikelySecret(
       `export function loadSettings() {\n  return readFileSync("settings.json", "utf8");\n}\n`,
@@ -60,9 +58,7 @@ test("regression: review blockers #1-#3", () => {
   // #1: `sk-` inside a longer word must not flag (`disk-` contains `sk-`).
   expect(containsLikelySecret(`backup: disk-abcdef1234567890ABCDEF\n`)).toBe(false);
   // #1 control: a real `sk-` token still flags.
-  expect(
-    containsLikelySecret(`key: "sk-abcdef1234567890ABCDEF"\n`),
-  ).toBe(true);
+  expect(containsLikelySecret(`key: "sk-abcdef1234567890ABCDEF"\n`)).toBe(true);
   // #2: multi-line quoted values are joined before detection.
   expect(
     containsLikelySecret(
@@ -83,39 +79,56 @@ test("regression: review blockers #1-#3", () => {
 
 test("regression: review majors #4-#7", () => {
   // #4: more provider prefixes.
-  expect(
-    containsLikelySecret(`NPM_TOKEN=npm_abcDEF1234567890abcdef1234567890ab\n`),
-  ).toBe(true);
-  expect(
-    containsLikelySecret(`pypi_token = "pypi-AgEIcHlwaS5vcmcCJGU5Y2YxMjM0NTY3ODkw"\n`),
-  ).toBe(true);
+  expect(containsLikelySecret(`NPM_TOKEN=npm_abcDEF1234567890abcdef1234567890ab\n`)).toBe(true);
+  expect(containsLikelySecret(`pypi_token = "pypi-AgEIcHlwaS5vcmcCJGU5Y2YxMjM0NTY3ODkw"\n`)).toBe(
+    true,
+  );
   // #5: bearer_token key name.
-  expect(
-    containsLikelySecret(`bearer_token = "7fK8qN2mT6vX9yZ3bD4hJ1pL5sW8aC0eG2i"\n`),
-  ).toBe(true);
+  expect(containsLikelySecret(`bearer_token = "7fK8qN2mT6vX9yZ3bD4hJ1pL5sW8aC0eG2i"\n`)).toBe(true);
   // #6: inline comments are stripped quote-aware; they must not decide detection.
   expect(
     containsLikelySecret(`API_KEY=abc # a very long production comment adding entropy here\n`),
   ).toBe(false);
   expect(
-    containsLikelySecret(
-      `API_KEY=sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v # production\n`,
-    ),
+    containsLikelySecret(`API_KEY=sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v # production\n`),
   ).toBe(true);
   // `#` inside a quoted value is preserved, not treated as a comment.
   expect(containsLikelySecret(`password = "xQ9#vL2$mK8@nB4!pT6&wZ3*"\n`)).toBe(true);
   // #7: short-but-strong values (16+) are caught.
   expect(containsLikelySecret(`password: "SuperSecret123!@#"\n`)).toBe(true);
   // Declaration keywords in source files are handled.
-  expect(
-    containsLikelySecret(`const password = "SuperSecret123!@#";\n`),
-  ).toBe(true);
+  expect(containsLikelySecret(`const password = "SuperSecret123!@#";\n`)).toBe(true);
   // CRLF line endings work.
-  expect(containsLikelySecret(`"OPENAI_API_KEY": "sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v"\r\n`)).toBe(true);
+  expect(
+    containsLikelySecret(`"OPENAI_API_KEY": "sk-K7q2Mv9xT4pL8nR3wY6bD1fH5jG0cS9aE2dZ7xU4v"\r\n`),
+  ).toBe(true);
   // Slack webhook URLs flag.
   expect(
     containsLikelySecret(
       `url = "https://hooks.slack.com/services/T12345678/B87654321/abcdefghijklmnopqrstuvwx"\n`,
     ),
   ).toBe(true);
+});
+
+test("does not treat npm package environment names as npm tokens", () => {
+  expect(containsLikelySecret("process.env.npm_package_scripts_test\n")).toBe(false);
+  expect(containsLikelySecret("NPM_TOKEN=npm_abcDEF1234567890abcdef1234567890ab\n")).toBe(true);
+});
+
+test("flags credential assignments inside inline objects", () => {
+  expect(containsLikelySecret('const cfg = { api_key: "xQ9#vL2$mK8@nB4!pT6&wZ3*" };\n')).toBe(true);
+});
+
+test("ignores inline credential assignments that reference environment values", () => {
+  expect(containsLikelySecret("const cfg = { api_key: process.env.API_KEY };\n")).toBe(false);
+});
+
+test("flags GitLab personal access token prefixes", () => {
+  expect(containsLikelySecret("GITLAB_TOKEN=glpat-abcDEF1234567890abcdef1234567890ab\n")).toBe(
+    true,
+  );
+});
+
+test("does not classify UUID-shaped identifiers as secrets", () => {
+  expect(containsLikelySecret('api_key: "550e8400-e29b-41d4-a716-446655440000"\n')).toBe(false);
 });

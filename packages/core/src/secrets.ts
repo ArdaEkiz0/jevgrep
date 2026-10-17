@@ -19,9 +19,8 @@
  *   `private_key` exclusion semantics.
  * - Length >= 16 and entropy >= 3.5 bits/char: tuned so
  *   `password: "SuperSecret123!@#"` (17 chars, ~3.57 bits) is caught while
- *   `password123` is not. UUID-shaped values (~3.4 bits) are knowingly missed;
- *   raising the bar would trade fewer false positives for more leaks — the
- *   wrong direction for this filter.
+ *   `password123` is not. UUID-shaped values are explicitly exempted because
+ *   they are common identifiers and do not provide enough evidence of a secret.
  * - bcrypt/argon2 password hashes are flagged too: not directly usable, but
  *   offline-crackable, so conservative exclusion is acceptable.
  * - An assignment whose value opens a quote that never closes is treated as
@@ -50,6 +49,7 @@ const KNOWN_PREFIXES = [
   "ghu_",
   "ghs_",
   "github_pat_",
+  "glpat-",
   "xoxb-",
   "xoxp-",
   "xoxa-",
@@ -72,10 +72,7 @@ const TOKEN_TAIL = "[A-Za-z0-9_\\-]{16,}";
  */
 const KNOWN_PREFIX_PATTERNS = [...KNOWN_PREFIXES]
   .sort((a, b) => b.length - a.length)
-  .map(
-    (prefix) =>
-      new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(prefix)}(${TOKEN_TAIL})`, "g"),
-  );
+  .map((prefix) => new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(prefix)}(${TOKEN_TAIL})`, "g"));
 
 /** Slack webhook URLs carry the secret in the path, not in a token prefix. */
 const SLACK_WEBHOOK_PATTERN = /hooks\.slack\.com\/services\/[A-Za-z0-9_\-/]{24,}/;
@@ -90,10 +87,13 @@ const KEY_NAME_PATTERN =
 
 /** Assignment shapes across .env / YAML / JSON / TOML / INI and source files, with optional quotes and declaration keywords. */
 const ASSIGNMENT_PATTERN =
-  /^\s*(?:(?:const|let|var|export|default|public|private|protected|static|readonly|final)\s+)*["']?([^"'=\s:]+)["']?\s*[:=]\s*([\s\S]+?)\s*$/;
+  /^\s*(?:(?:const|let|var|export|default|public|private|protected|static|readonly|final)\s+)*["']?([^"'=\s:]+)["']?\s*[:=]\s*/;
 
 const PLACEHOLDER_PATTERN =
   /^(?:your|example|test|fake|dummy|sample|changeme|placeholder|redacted|masked|todo|fixme|none|null|undefined|nil|tbd)[\w-]*$|^x+$|^<.*>$|^\*+$|^\$\{[^}]*\}$|^\{\{[^}]*\}\}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const REFERENCE_PATTERN =
+  /^(?:process|import\.meta|env|config|settings|secrets)(?:\.[A-Za-z_$][\w$]*)+$/;
 
 const MIN_SECRET_LENGTH = 16;
 const MIN_SECRET_ENTROPY = 3.5;
@@ -117,9 +117,7 @@ function shannonEntropy(value: string): number {
 /** True when the tail of a prefix-matched token looks like redacted/example material. */
 function isPlaceholderTail(tail: string): boolean {
   const lower = tail.toLowerCase();
-  return (
-    /xxx|example|placeholder|redacted|masked/.test(lower) || new Set(lower).size === 1
-  );
+  return /xxx|example|placeholder|redacted|masked/.test(lower) || new Set(lower).size === 1;
 }
 
 /** Returns the matched secret token, or undefined when no known prefix fires. */
@@ -131,6 +129,9 @@ function findSecretToken(line: string): string | undefined {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
+      // npm exposes package metadata as long `npm_package_*` environment
+      // names; those identifiers are not npm access tokens.
+      if (match[0].toLowerCase().startsWith("npm_package_")) continue;
       if (!placeholderAt.has(match.index)) {
         if (match[1] !== undefined && !isPlaceholderTail(match[1])) return match[0];
         placeholderAt.add(match.index);
@@ -142,7 +143,12 @@ function findSecretToken(line: string): string | undefined {
 }
 
 function cleanValue(raw: string): string {
-  const value = raw.trim().replace(/[,;]$/, "").trim();
+  let value = raw
+    .trim()
+    .replace(/[,;\s]+$/, "")
+    .trim();
+  if (value.endsWith("}") && !value.startsWith("${") && !value.startsWith("{{"))
+    value = value.slice(0, -1).trim();
   const quote = value[0];
   if (value.length < 2 || (quote !== '"' && quote !== "'" && quote !== "`")) return value;
   for (let i = 1; i < value.length; i++) {
@@ -153,6 +159,31 @@ function cleanValue(raw: string): string {
     if (value[i] === quote) return value.slice(1, i).trim();
   }
   return value;
+}
+
+/** Find assignment-shaped expressions outside quoted strings on one logical line. */
+function assignments(line: string): Array<{ key: string; rawValue: string }> {
+  const matches: Array<{ key: string; rawValue: string }> = [];
+  let quote: string | null = null;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index]!;
+    if (quote !== null) {
+      if (char === "\\") index++;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (index !== 0 && !"{,;".includes(char)) continue;
+    const candidate = line.slice(index === 0 ? index : index + 1);
+    const match = ASSIGNMENT_PATTERN.exec(candidate);
+    if (match?.[1] !== undefined) {
+      matches.push({ key: match[1], rawValue: candidate.slice(match[0].length) });
+    }
+  }
+  return matches;
 }
 
 function isPlaceholder(value: string): boolean {
@@ -176,6 +207,8 @@ function hasUnclosedQuote(raw: string): boolean {
 
 function looksLikeSecretValue(value: string): boolean {
   if (value.length < MIN_SECRET_LENGTH || isPlaceholder(value)) return false;
+  if (REFERENCE_PATTERN.test(value)) return false;
+  if (UUID_PATTERN.test(value)) return false;
   if (findSecretToken(value) !== undefined) return true;
   if (LONG_TOKEN_RUN.test(value)) return true;
   return shannonEntropy(value) >= MIN_SECRET_ENTROPY;
@@ -236,13 +269,9 @@ export function containsLikelySecret(source: string): boolean {
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) continue;
     if (findSecretToken(trimmed) !== undefined) return true;
     if (SLACK_WEBHOOK_PATTERN.test(trimmed)) return true;
-    const assignment = ASSIGNMENT_PATTERN.exec(trimmed);
-    if (
-      assignment?.[1] !== undefined &&
-      assignment[2] !== undefined &&
-      KEY_NAME_PATTERN.test(assignment[1])
-    ) {
-      const rawValue = assignment[2];
+    for (const assignment of assignments(trimmed)) {
+      if (!KEY_NAME_PATTERN.test(assignment.key)) continue;
+      const rawValue = assignment.rawValue;
       if (hasUnclosedQuote(rawValue)) return true;
       if (looksLikeSecretValue(cleanValue(rawValue))) return true;
     }
