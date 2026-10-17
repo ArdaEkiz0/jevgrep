@@ -35,8 +35,7 @@ inventory is only partial. This is neither an upload estimate nor a privacy audi
 Narrow the root or use repeatable root-relative gitignore patterns such as
 `--exclude 'src/generated/'`. Pass the same root and filtering flags to `jg files`
 and the search. Excluding tests also removes potentially useful regression-test
-context. Check `jg --help` for available options; older installations may need an
-upgrade for `files` and `--exclude`.
+context. Check `jg --help` for available options.
 
 When delegating behavioral discovery, name `jg` and the repository root in the
 subagent's instructions. Read returned excerpts before repeating discovery; use

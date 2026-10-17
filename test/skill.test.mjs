@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-test("skill installer forwards arguments and exit status through the platform launcher", async (t) => {
+test("skill installer preserves local source arguments through the platform launcher", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "jevgrep-skill-"));
   t.after(() => rm(home, { recursive: true, force: true }));
+  const checkoutRoot = fileURLToPath(new URL("../", import.meta.url));
+  const checkoutScratch = await mkdtemp(join(tmpdir(), ".tmp-skill-"));
+  t.after(() => rm(checkoutScratch, { recursive: true, force: true }));
+  await symlink(
+    join(checkoutRoot, "node_modules"),
+    join(checkoutScratch, "node_modules"),
+    "junction",
+  );
   const bin = join(home, "installer with spaces");
   await mkdir(bin);
   const fixture = fileURLToPath(new URL("./fixtures/skill-installer.mjs", import.meta.url));
@@ -21,9 +29,19 @@ test("skill installer forwards arguments and exit status through the platform la
       : `#!/bin/sh\nexec "${process.execPath}" "${fixture}" "$@"\n`,
     { mode: 0o755 },
   );
-  const cli =
-    process.env.JEVGREP_TEST_CLI ??
-    fileURLToPath(new URL("../apps/cli/dist/bin/index.js", import.meta.url));
+
+  let cli = process.env.JEVGREP_TEST_CLI;
+  let packageDist;
+  if (cli) {
+    packageDist = dirname(dirname(cli));
+  } else {
+    packageDist = join(checkoutScratch, "cli bundle & with spaces", "dist");
+    await cp(fileURLToPath(new URL("../apps/cli/dist", import.meta.url)), packageDist, {
+      recursive: true,
+    });
+    cli = join(packageDist, "bin", "index.js");
+  }
+  const source = await realpath(join(packageDist, "skills", "jevgrep"));
   const result = await promisify(execFile)(
     process.execPath,
     [cli, "skill", "--agent", "claude-code", "--agent", "codex", "--global", "--yes"],
@@ -48,9 +66,10 @@ test("skill installer forwards arguments and exit status through the platform la
   assert.equal(result.stderr, "");
   assert.deepEqual(JSON.parse(await readFile(join(home, "installed-skill.json"), "utf8")), [
     "--yes",
-    "skills",
+    "--ignore-scripts",
+    "skills@1.7.0",
     "add",
-    "dzhng/jevgrep",
+    source,
     "--skill",
     "jevgrep",
     "--agent",
