@@ -123,8 +123,7 @@ it installs the bundled skill with npm lifecycle scripts disabled and requires
 Node 22.20+ and npm/npx with network access for the pinned installer. Installer
 transitive dependencies remain an external trust boundary.
 
-Installing the skill does not configure the provider key. Users of 0.1.0, whose
-`jg skill` only prints the skill, should upgrade the CLI first.
+Installing the skill does not configure the provider key.
 
 Search does not install skills or edit agent configuration. Only an explicit
 skill installation command invokes the installer. The skill directs the agent

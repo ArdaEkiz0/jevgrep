@@ -28,9 +28,6 @@ jg "How are telemetry events recorded and sent?" ./my-project
 Requires **Node.js 22+**, **macOS, Linux, or Windows**, and a key for **Vercel AI Gateway, TypeSafe, OpenRouter, OpenCode Zen, or a custom TypeSafe-compatible endpoint**.
 No separate Python, Bun, or ripgrep installation is required to use `jg`.
 
-Provider selection requires **0.3.0 or newer**. Upgrade an older installation with
-`npm install --global @dzhng/jevgrep@latest`.
-
 ## Install the agent skill — required for agent setup
 
 Installing the CLI alone does not teach your coding agent to use it. **Install
@@ -52,8 +49,7 @@ your selected provider’s key. The skill installer itself does not configure cr
 [skills CLI](https://github.com/vercel-labs/skills), with npm lifecycle scripts
 disabled. Skill installation needs Node 22.20+ and npm/npx plus network access
 for the installer; it does not fetch skill instructions from GitHub. Use `jg skill`
-so the installed instructions match your CLI release. Users of 0.1.0, whose
-`jg skill` only prints the skill, should upgrade the CLI first.
+so the installed instructions match your CLI release.
 
 ### Upgrade
 
