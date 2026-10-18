@@ -718,9 +718,6 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
           files.set(candidate.path, selection.file);
           declarations.set(candidate.path, selection.declarations);
           groupCounts.set(candidate.path, selection.groups);
-          for (const entry of selection.issues)
-            if (entry.kind !== "source-invalid")
-              issue(entry.kind, entry.count, selection.providerFailure);
         };
         if (evidence) {
           for (const candidate of ordered) {

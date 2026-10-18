@@ -118,7 +118,7 @@ lines, while excerpt extraction retains the reference's newline-splitting rule.
 and recovery were unspecified. **Reach:** the package owns runtime assets and one
 child process, without a system-Python dependency or an interpreter pool.
 **Verdict:** sound because cancellation has one owner and replay is confined to
-pure inspection. **Confidence:** medium. Owner: [Python host](../../../packages/core/src/python.ts);
+pure inspection. **Confidence:** medium. Owner: [parser host](../../../packages/core/src/parser.ts);
 [runtime rationale](assets/python-runtime.md) owns the version boundary.
 
 ### Keep directory enumeration order distinct from preview order
