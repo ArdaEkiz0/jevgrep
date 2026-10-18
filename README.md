@@ -167,4 +167,7 @@ reasoning behind retrieval, parsing, caching, and failure handling, start with t
 [Release guidance](scripts/RELEASING.md) covers tag-triggered npm publication and
 verification of the exact public package.
 
+See [Contributing](CONTRIBUTING.md) for the pull-request review and maintenance
+policy.
+
 [MIT](LICENSE). [Artwork and generation prompts](assets/README.md).
