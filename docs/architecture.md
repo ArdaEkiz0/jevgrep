@@ -22,8 +22,9 @@ byte was found. Oversized preview requests are split into bounded source chunks.
 
 Discovery streams source previews into bounded navigation batches with backpressure,
 so a wide directory can begin scoring before all of its files have been read. Split
-retries stay in the same queue and preserve admission order; stale donors, cancellation,
-and source-generator or result-processing errors stop admission while active evaluations drain.
+retries stay in the same queue and preserve admission order. Stale files are isolated
+or dropped while admission continues; cancellation and terminal source or result-processing
+errors stop admission while active evaluations drain.
 
 A relationship pass can recover implementations of the same class contract across
 platforms. Directory samples and whole-file previews use the same relationship

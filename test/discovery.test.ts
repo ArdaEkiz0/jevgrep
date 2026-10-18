@@ -865,8 +865,7 @@ testIfDocker(
       { root, query: "late match", signal: new AbortController().signal },
       {
         requests: 0,
-        async evaluate(request, policy) {
-          await policy?.beforeAttempt?.();
+        async evaluate(request) {
           const state = request.state as {
             items?: Array<{ path: string; filePreview?: { text: string } }>;
           };
@@ -977,6 +976,70 @@ testIfDocker("discovery propagates result-processing errors", async () => {
         },
       ),
     ).rejects.toBe(failure);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+testIfDocker(
+  "completed navigation groups survive a terminal stop behind an unfinished split",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-discovery-completed-stop-"));
+    try {
+      for (let index = 0; index < 257; index++)
+        await writeFile(join(root, `f${String(index).padStart(3, "0")}.txt`), `entry ${index}\n`);
+      const result = await retrieve(
+        { root, query: "completed group", signal: new AbortController().signal },
+        {
+          requests: 0,
+          async evaluate(request) {
+            const items = (request.state as Body["state"]).items;
+            if (items) {
+              if (items[0]?.path === "f000.txt") throw new EvaluationFailure("provider", true);
+              if (items[0]?.path === "f050.txt") throw new EvaluationFailure("request-limit");
+            }
+            return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+          },
+        },
+      );
+      expect(result.status).toBe("incomplete");
+      expect(result.files.map(({ path }) => path)).toContain("f025.txt");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+testIfDocker("oversized preview chunks retain main's batch ordering", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jg-oversized-order-"));
+  const requests: Array<{ paths: string[]; bytes: number }> = [];
+  try {
+    await writeFile(
+      join(root, "a.ts"),
+      Array.from(
+        { length: 1500 },
+        (_, index) => `export function f${index}() { return ${index}; }\n`,
+      ).join(""),
+    );
+    await writeFile(join(root, "b.txt"), "b");
+    const result = await retrieve(
+      { root, query: "context ".repeat(3000), signal: new AbortController().signal },
+      {
+        requests: 0,
+        async evaluate(request) {
+          const items = (request.state as Body["state"]).items;
+          if (items)
+            requests.push({
+              paths: items.map((item) => item.path),
+              bytes: Buffer.byteLength(JSON.stringify(request)),
+            });
+          return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+        },
+      },
+    );
+    expect(result.status).toBe("complete");
+    expect(requests[0]?.paths[0]).toBe("b.txt");
+    expect(requests[0]?.bytes).toBeLessThan(38_000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

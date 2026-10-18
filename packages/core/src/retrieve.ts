@@ -125,12 +125,18 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
     let commit = 0;
     let failure: unknown;
     let budgetPaused = false;
-    function flush() {
+    function flush(force = false) {
       while (commit < ordered.length && ordered[commit]!.state === "done") {
         const group = ordered[commit++]!;
         for (const result of group.results ?? []) {
-          results.push(result);
           consume(result.item, result.score);
+        }
+      }
+      if (force) {
+        for (; commit < ordered.length; commit++) {
+          const group = ordered[commit]!;
+          if (group.state !== "done") continue;
+          for (const result of group.results ?? []) consume(result.item, result.score);
         }
       }
     }
@@ -185,6 +191,7 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
         if (score > relevanceBoundary) positiveScoresSeen++;
       }
       await confirmSource(classified);
+      results.push(...classified);
       group.results = classified;
       group.state = "done";
       flush();
@@ -229,6 +236,24 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
       budgetPaused = false;
       pump();
     }
+    async function drain() {
+      for (;;) {
+        if (failure || stop || input.signal.aborted) break;
+        if (budgetPaused) {
+          await settleBudget();
+          continue;
+        }
+        pump();
+        if (active.size) {
+          await Promise.race(active);
+          continue;
+        }
+        if (queued.length) continue;
+        break;
+      }
+      await waitForProgress();
+      flush(Boolean(failure || stop || input.signal.aborted));
+    }
     async function submit(group: NavigationItem[]) {
       const entry: Group = { items: group, state: "queued" };
       ordered.push(entry);
@@ -270,14 +295,14 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
         batch.push(item);
       }
       if (batch.length) await submit(batch);
-      if (budgetPaused) await settleBudget();
+      await drain();
     } catch (error) {
       failure ??= error;
     } finally {
-      await waitForProgress();
+      await drain();
     }
     if (failure) throw failure;
-    flush();
+    flush(Boolean(stop || input.signal.aborted));
     return results;
   }
   async function previewDirectory(path: string): Promise<DirectoryPreview | undefined> {
@@ -439,6 +464,7 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
       const level = directories.splice(0).map((path) => ({ path, depth: 0 }));
       const hashes = new Map<string, string>();
       async function* items(): AsyncGenerator<NavigationItem> {
+        const expanded: NavigationItem[] = [];
         for (let index = 0; index < level.length && !stop; index++) {
           const current = level[index]!;
           if (entriesSeen >= 100_000) {
@@ -498,25 +524,28 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
               ) {
                 for (const chunk of splitSource(source, 12_000)) {
                   const text = sourceForUnit(source, chunk);
-                  yield buffered(
-                    {
-                      path: entry.path,
-                      kind: "file",
-                      filePreview: {
-                        sizeBytes: filePreview.sizeBytes,
-                        extension: filePreview.extension,
-                        text,
-                        previewBytes: Buffer.byteLength(text),
-                        truncated: true,
-                        range: "sampled source ranges",
+                  expanded.push(
+                    buffered(
+                      {
+                        path: entry.path,
+                        kind: "file",
+                        filePreview: {
+                          sizeBytes: filePreview.sizeBytes,
+                          extension: filePreview.extension,
+                          text,
+                          previewBytes: Buffer.byteLength(text),
+                          truncated: true,
+                          range: "sampled source ranges",
+                        },
                       },
-                    },
-                    [source],
+                      [source],
+                    ),
                   );
                 }
               } else yield item;
             }
           }
+          yield* expanded;
         }
       }
       const classified: Array<{ item: NavigationItem; score: number }> = [];
