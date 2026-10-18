@@ -56,7 +56,9 @@ export function renderResult(
           `No confident match within the navigation budget (${navigationByteBudget} serialized bytes); narrow the root to continue.`,
         ]
       : []),
-    "Symbols use name@start-end. Roles are estimates; locations-only files remain reading leads.",
+    noLocations
+      ? "Roles are estimates. Declaration locations omitted."
+      : "Symbols use name@start-end. Roles are estimates; locations-only files remain reading leads.",
     `AGENTS.md lookup (root and returned-file ancestors): ${context.instructionFiles.length ? context.instructionFiles.map(quote).join(", ") : "none found"}${context.instructionLookupIncomplete ? "; lookup incomplete" : ""}.`,
     ...(result.status === "interrupted" ? ["Interrupted."] : []),
     ...(omittedCount ? [`Source omitted: ${omittedCount} file(s).`] : []),
@@ -64,7 +66,7 @@ export function renderResult(
     ...result.issues.map(({ kind, count }) => `Issue: ${quote(kind)}: ${count}`),
     ...(result.providerFailure ? [`Provider error: ${quote(result.providerFailure)}`] : []),
     ...files.flatMap(({ file, excerpts, omitted }) => [
-      `- ${quote(file.path)} — ${file.roles.join(", ") || "relevant; role uncertain"}; ${excerpts.length ? "source below" : omitted ? "source omitted" : "locations only"}`,
+      `- ${quote(file.path)} — ${file.roles.join(", ") || "relevant; role uncertain"}; ${excerpts.length ? "source below" : omitted ? "source omitted" : noLocations ? "path only" : "locations only"}`,
     ]),
     noLocations ? "End file list." : "End file list. Declaration locations follow source.",
   ];
