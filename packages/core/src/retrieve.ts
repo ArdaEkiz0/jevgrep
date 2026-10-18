@@ -92,11 +92,21 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
   let confidentSourceSeen = false;
   const sourceProbes = new Set<string>();
   const firstSelections = new Map<string, { contentHash: string; selection: SelectionResult }>();
+  let progressBytes = 0;
   let stop = false;
   function issue(kind: string, count = 1, message?: string) {
     if (kind === "provider") providerFailure ??= message;
     issues.set(kind, (issues.get(kind) ?? 0) + count);
     if (["authentication", "request-limit", "cancelled", "interrupted"].includes(kind)) stop = true;
+  }
+  function reportSnapshot(snapshot: Snapshot) {
+    if (!inspected.add(snapshot.path)) return;
+    progressBytes += Buffer.byteLength(snapshot.source);
+    try {
+      input.progress?.({ files: inspected.size, bytes: progressBytes });
+    } catch {
+      // Progress is observational and must never change search behavior.
+    }
   }
   async function snapshot(path: string) {
     const result = await reader.readSnapshot(path, { reuse: true });
@@ -105,7 +115,7 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
       return;
     }
     if (result.status === "excluded") return;
-    inspected.add(path);
+    reportSnapshot(result.snapshot);
     return result.snapshot;
   }
   function isCancellation(error: unknown) {
@@ -594,7 +604,7 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
     // Unchanged file identity reuses the reader's earlier snapshot; any change rereads and rehashes.
     const result = await reader.readSnapshot(candidate.path, { reuse: true });
     if (result.status === "ok" && result.snapshot.contentHash === candidate.contentHash) {
-      inspected.add(candidate.path);
+      reportSnapshot(result.snapshot);
       return result.snapshot;
     }
     issue(result.status === "issue" ? result.issue.kind : "changed");

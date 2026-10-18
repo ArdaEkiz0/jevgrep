@@ -1,4 +1,5 @@
 import { createFilesystem, type FilesystemPolicy } from "./filesystem";
+import type { ProgressSnapshot } from "./types";
 
 export type InventoryInput = {
   root: string;
@@ -9,6 +10,7 @@ export type InventoryInput = {
   includePaths?: boolean;
   /** Matches the entry bound search discovery applies in retrieve.ts. */
   maxEntries?: number;
+  progress?: (snapshot: ProgressSnapshot) => void;
 };
 export type Inventory = {
   status: "complete" | "incomplete" | "interrupted";
@@ -39,6 +41,13 @@ export async function inventory(input: InventoryInput): Promise<Inventory> {
   let seen = 0;
   const paths = input.includePaths ? ([] as string[]) : undefined;
   const pending = ["."];
+  const reportProgress = () => {
+    try {
+      input.progress?.({ files, bytes });
+    } catch {
+      // Progress is observational and must never change inventory behavior.
+    }
+  };
   try {
     walk: for (let next = 0; next < pending.length; next++) {
       let cursor: string | undefined;
@@ -68,6 +77,7 @@ export async function inventory(input: InventoryInput): Promise<Inventory> {
             files++;
             bytes += entry.bytes ?? 0;
             paths?.push(entry.path);
+            reportProgress();
           }
         } while (cursor);
       } finally {

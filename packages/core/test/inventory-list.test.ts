@@ -62,3 +62,23 @@ test("inventory optionally retains eligible paths and respects exclusions and en
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("inventory progress reports cumulative eligible files and bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jevgrep-inventory-progress-"));
+  try {
+    await writeFile(join(root, "a.ts"), "a");
+    await writeFile(join(root, "b.ts"), "bb");
+    const updates: Array<{ files: number; bytes: number }> = [];
+
+    const result = await inventory({
+      root,
+      signal: new AbortController().signal,
+      progress: (snapshot) => updates.push(snapshot),
+    });
+
+    expect(result.files).toBe(2);
+    expect(updates.at(-1)).toEqual({ files: 2, bytes: 3 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
