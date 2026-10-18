@@ -1012,7 +1012,7 @@ testIfDocker(
 
 testIfDocker("oversized preview chunks retain main's batch ordering", async () => {
   const root = await mkdtemp(join(tmpdir(), "jg-oversized-order-"));
-  const requests: Array<{ paths: string[]; bytes: number }> = [];
+  const requests: Array<{ paths: string[]; bytes: number; chunks: string[] }> = [];
   try {
     await writeFile(
       join(root, "a.ts"),
@@ -1022,6 +1022,10 @@ testIfDocker("oversized preview chunks retain main's batch ordering", async () =
       ).join(""),
     );
     await writeFile(join(root, "b.txt"), "b");
+    for (const directory of ["dir-a", "dir-b"]) {
+      await mkdir(join(root, directory));
+      await writeFile(join(root, directory, "file.txt"), `${directory} source\n`);
+    }
     const result = await retrieve(
       { root, query: "context ".repeat(3000), signal: new AbortController().signal },
       {
@@ -1032,14 +1036,24 @@ testIfDocker("oversized preview chunks retain main's batch ordering", async () =
             requests.push({
               paths: items.map((item) => item.path),
               bytes: Buffer.byteLength(JSON.stringify(request)),
+              chunks: items
+                .filter((item) => item.path === "a.ts")
+                .map((item) => item.filePreview?.text ?? ""),
             });
           return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
         },
       },
     );
     expect(result.status).toBe("complete");
-    expect(requests[0]?.paths[0]).toBe("b.txt");
-    expect(requests[0]?.bytes).toBeLessThan(38_000);
+    expect(requests.every(({ bytes }) => bytes < 38_000)).toBe(true);
+    const sequence = requests.flatMap(({ paths }) => paths);
+    const firstChunk = sequence.indexOf("a.ts");
+    expect(firstChunk).toBeGreaterThan(-1);
+    for (const path of ["b.txt", "dir-a/file.txt", "dir-b/file.txt"])
+      expect(sequence.indexOf(path)).toBeLessThan(firstChunk);
+    const chunks = requests.flatMap(({ chunks }) => chunks);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(new Set(chunks).size).toBe(chunks.length);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

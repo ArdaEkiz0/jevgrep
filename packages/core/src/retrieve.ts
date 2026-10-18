@@ -545,8 +545,8 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
               } else yield item;
             }
           }
-          yield* expanded;
         }
+        yield* expanded;
       }
       const classified: Array<{ item: NavigationItem; score: number }> = [];
       await score(items(), anchor, (item, probability) => {
