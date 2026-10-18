@@ -197,11 +197,11 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
         if (score >= weakScoreCeiling) strongScoreSeen = true;
         if (score > relevanceBoundary) positiveScoresSeen++;
       }
-      await confirmSource(classified);
       results.push(...classified);
       group.results = classified;
       group.state = "done";
       flush();
+      await confirmSource(classified);
     }
     function pump() {
       while (

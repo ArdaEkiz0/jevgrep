@@ -1104,3 +1104,43 @@ testIfDocker(
     }
   },
 );
+
+testIfDocker(
+  "cancellation during per-group source confirmation preserves the scored Python file",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-discovery-probe-cancel-"));
+    const controller = new AbortController();
+    const source = await import("../packages/core/src/source");
+    const { spyOn } = await import("bun:test");
+    const reason = new DOMException("cancelled during probe", "AbortError");
+    let inspect;
+    try {
+      await writeFile(
+        join(root, "target.py"),
+        "class Target:\n    def run(self):\n        return 1\n",
+      );
+      inspect = spyOn(source, "inspect").mockImplementation(async () => {
+        controller.abort(reason);
+        throw reason;
+      });
+      const result = await retrieve(
+        { root, query: "find Target", signal: controller.signal },
+        {
+          requests: 0,
+          async evaluate(request) {
+            const items = (request.state as { items?: unknown[] }).items;
+            return Object.fromEntries(
+              Object.keys(request.questions).map((id) => [id, items ? 0.9 : 0.9]),
+            );
+          },
+        },
+      );
+      expect(result.status).toBe("interrupted");
+      expect(result.files.map(({ path }) => path)).toContain("target.py");
+    } finally {
+      controller.abort(reason);
+      inspect?.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
