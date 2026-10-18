@@ -10,6 +10,7 @@ import { stat } from "node:fs/promises";
 import { version } from "../package.json";
 import { installSkill } from "./skill";
 import { createProgress } from "./progress";
+import { exitCodeForResult } from "./exit-code";
 
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
@@ -121,8 +122,7 @@ async function main() {
       }
       if (pipeClosed) return;
       await write(renderInventory(result));
-      process.exitCode =
-        result.status === "interrupted" ? 130 : result.status === "incomplete" ? 2 : 0;
+      process.exitCode = exitCodeForResult(result);
       return;
     }
     case "search": {
@@ -161,8 +161,7 @@ async function main() {
       await write(
         renderResult(result, command.maxSourceBytes, command.maxOutputBytes, command.noLocations),
       );
-      process.exitCode =
-        result.status === "interrupted" ? 130 : result.status === "incomplete" ? 2 : 0;
+      process.exitCode = exitCodeForResult(result);
     }
   }
 }

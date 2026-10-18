@@ -98,6 +98,12 @@ answers are cached: provider errors and the final search result are never stored
 Rerunning after the connection recovers retries failed work while reusing valid
 answers; `--no-cache` additionally bypasses those valid cached answers.
 
+Bounded resource limits are a backstop for large or changing trees. They remain
+visible as `discovery incomplete` and `Issue: "resource_limit"`, but a result
+containing only those issues exits successfully so shells and coding agents do
+not mistake useful partial output for a failed command. Provider and other
+operational issues retain the incomplete exit status.
+
 The summary comes first, followed by file and declaration locations and selected
 source. Locations are reading leads, not a checklist. Omitted excerpts are marked;
 `--max-source-bytes 0` includes all selected source. An incomplete result can still
