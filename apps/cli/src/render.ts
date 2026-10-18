@@ -21,6 +21,7 @@ export function renderResult(
   result: RetrievalResult,
   maxSourceBytes = DEFAULT_MAX_SOURCE_BYTES,
   maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
+  noLocations = false,
 ): string {
   let remaining = maxSourceBytes || Infinity;
   const files = [...result.files]
@@ -55,7 +56,9 @@ export function renderResult(
           `No confident match within the navigation budget (${navigationByteBudget} serialized bytes); narrow the root to continue.`,
         ]
       : []),
-    "Symbols use name@start-end. Roles are estimates; locations-only files remain reading leads.",
+    noLocations
+      ? "Roles are estimates. Declaration locations omitted."
+      : "Symbols use name@start-end. Roles are estimates; locations-only files remain reading leads.",
     `AGENTS.md lookup (root and returned-file ancestors): ${context.instructionFiles.length ? context.instructionFiles.map(quote).join(", ") : "none found"}${context.instructionLookupIncomplete ? "; lookup incomplete" : ""}.`,
     ...(result.status === "interrupted" ? ["Interrupted."] : []),
     ...(omittedCount ? [`Source omitted: ${omittedCount} file(s).`] : []),
@@ -63,9 +66,9 @@ export function renderResult(
     ...result.issues.map(({ kind, count }) => `Issue: ${quote(kind)}: ${count}`),
     ...(result.providerFailure ? [`Provider error: ${quote(result.providerFailure)}`] : []),
     ...files.flatMap(({ file, excerpts, omitted }) => [
-      `- ${quote(file.path)} — ${file.roles.join(", ") || "relevant; role uncertain"}; ${excerpts.length ? "source below" : omitted ? "source omitted" : "locations only"}`,
+      `- ${quote(file.path)} — ${file.roles.join(", ") || "relevant; role uncertain"}; ${excerpts.length ? "source below" : omitted ? "source omitted" : noLocations ? "path only" : "locations only"}`,
     ]),
-    "End file list. Declaration locations follow source.",
+    noLocations ? "End file list." : "End file list. Declaration locations follow source.",
   ];
   for (const { file, excerpts } of files)
     for (const { range, source, partial, sourceByteStart, sourceByteEnd } of excerpts) {
@@ -92,19 +95,23 @@ export function renderResult(
       for (const line of sourceLines) lines.push(line);
       lines.push(fence);
     }
-  lines.push("", "Declaration locations:");
-  for (const { file, omitted } of files) {
-    lines.push(
-      `- ${quote(file.path)}`,
-      ...[...file.leads]
-        .sort((a, b) => a.range.startLine - b.range.startLine)
-        .map((lead) => `  ${inlineLabel(lead.name)}@${lead.range.startLine}-${lead.range.endLine}`),
-      ...(file.callLeads ?? []).map(
-        (call) =>
-          `  Possible local call ${inlineLabel(call.caller)} -> ${inlineLabel(call.name)}: lines ${call.range.startLine}-${call.range.endLine}${call.unknownEarlierBases.length ? `; earlier base(s) ${call.unknownEarlierBases.map(quote).join(", ")} not inspected` : ""}; runtime dispatch not verified.`,
-      ),
-      ...(omitted ? ["  Some source omitted; locations remain available."] : []),
-    );
+  if (!noLocations) {
+    lines.push("", "Declaration locations:");
+    for (const { file, omitted } of files) {
+      lines.push(
+        `- ${quote(file.path)}`,
+        ...[...file.leads]
+          .sort((a, b) => a.range.startLine - b.range.startLine)
+          .map(
+            (lead) => `  ${inlineLabel(lead.name)}@${lead.range.startLine}-${lead.range.endLine}`,
+          ),
+        ...(file.callLeads ?? []).map(
+          (call) =>
+            `  Possible local call ${inlineLabel(call.caller)} -> ${inlineLabel(call.name)}: lines ${call.range.startLine}-${call.range.endLine}${call.unknownEarlierBases.length ? `; earlier base(s) ${call.unknownEarlierBases.map(quote).join(", ")} not inspected` : ""}; runtime dispatch not verified.`,
+        ),
+        ...(omitted ? ["  Some source omitted; locations remain available."] : []),
+      );
+    }
   }
   const output = lines.join("\n") + "\n\nEnd context.\n";
   const outputBytes = Buffer.byteLength(output);

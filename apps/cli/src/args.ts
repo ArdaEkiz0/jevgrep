@@ -21,6 +21,7 @@ export type Command =
       maxRequests: number;
       maxSourceBytes: number;
       maxOutputBytes: number;
+      noLocations: boolean;
       policy: NonNullable<SearchInput["policy"]>;
     };
 
@@ -46,6 +47,7 @@ export function parseCommand(args: string[]): Command {
         "max-requests": { type: "string" },
         "max-source-bytes": { type: "string" },
         "max-output-bytes": { type: "string" },
+        "no-locations": { type: "boolean" },
         hidden: { type: "boolean" },
         "no-ignore": { type: "boolean" },
         "include-dependencies": { type: "boolean" },
@@ -179,6 +181,7 @@ export function parseCommand(args: string[]): Command {
     maxRequests,
     maxSourceBytes,
     maxOutputBytes,
+    noLocations: values["no-locations"] ?? false,
     policy,
   };
 }
@@ -246,6 +249,7 @@ Search options:
   --max-requests N         Provider request ceiling (default: 1000)
   --max-source-bytes N     Source allocation; 0 means unlimited (default: ${DEFAULT_MAX_SOURCE_BYTES})
   --max-output-bytes N     Total stdout cap; 0 means unlimited (default: ${DEFAULT_MAX_OUTPUT_BYTES})
+  --no-locations          Omit the trailing "Declaration locations:" section
   --hidden                Include hidden paths
   --no-ignore             Disable .gitignore/.ignore patterns
   --include-dependencies  Include dependency and build directories
