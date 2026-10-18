@@ -20,6 +20,11 @@ scan of unseen source. This limits upload cost but can miss relevant code later
 in a file. Completion means the planned search finished, not that every relevant
 byte was found. Oversized preview requests are split into bounded source chunks.
 
+Discovery streams source previews into bounded navigation batches with backpressure,
+so a wide directory can begin scoring before all of its files have been read. Split
+retries stay in the same queue and preserve admission order; stale donors, cancellation,
+and source-generator or result-processing errors stop admission while active evaluations drain.
+
 A relationship pass can recover implementations of the same class contract across
 platforms. Directory samples and whole-file previews use the same relationship
 criterion, bound to each item's own source. One matching sibling must not make

@@ -841,3 +841,143 @@ testIfDocker(
   },
   120_000,
 );
+
+testIfDocker(
+  "discovery scores a bounded prefix before reading late files and retains late matches",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-stream-discovery-"));
+    let first!: () => void;
+    const started = new Promise<void>((resolve) => {
+      first = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const count = 100;
+    for (let index = 0; index < count; index++)
+      await writeFile(
+        join(root, `${String(index).padStart(3, "0")}.txt`),
+        "source line\n".repeat(2500),
+      );
+    const latePath = join(root, "099.txt");
+    const pending = retrieve(
+      { root, query: "late match", signal: new AbortController().signal },
+      {
+        requests: 0,
+        async evaluate(request, policy) {
+          await policy?.beforeAttempt?.();
+          const state = request.state as {
+            items?: Array<{ path: string; filePreview?: { text: string } }>;
+          };
+          if (state.items) {
+            first();
+            await writeFile(latePath, "LATE_MATCH\n".repeat(2500));
+            await gate;
+          }
+          return Object.fromEntries(
+            Object.keys(request.questions).map((id, index) => [
+              id,
+              state.items
+                ? state.items[index]?.filePreview?.text.includes("LATE_MATCH")
+                  ? 0.9
+                  : 0.1
+                : 0.9,
+            ]),
+          );
+        },
+      },
+    );
+    try {
+      await started;
+      release();
+      const result = await pending;
+      expect(result.status).toBe("complete");
+      expect(result.files.map((file) => file.path)).toEqual(["099.txt"]);
+    } finally {
+      release();
+      await pending;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  30000,
+);
+
+testIfDocker(
+  "discovery propagates source-generator errors after active work drains",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-generator-error-"));
+    const source = await import("../packages/core/src/source");
+    const { spyOn } = await import("bun:test");
+    const failure = new Error("fixture preview failure");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    let active = 0;
+    let callsAtFailure = 0;
+    let preview;
+    try {
+      for (let index = 0; index < 200; index++)
+        await writeFile(join(root, `a${String(index).padStart(3, "0")}.txt`), `entry ${index}\n`);
+      await writeFile(join(root, "z.py"), "def f():\n    return 1\n".repeat(4000));
+      preview = spyOn(source, "pythonPreview").mockImplementation(async () => {
+        callsAtFailure = calls;
+        setTimeout(release, 0);
+        throw failure;
+      });
+      await expect(
+        retrieve(
+          { root, query, signal: new AbortController().signal },
+          {
+            requests: 0,
+            async evaluate() {
+              calls++;
+              active++;
+              try {
+                await gate;
+                throw new EvaluationFailure("provider", true);
+              } finally {
+                active--;
+              }
+            },
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect(callsAtFailure).toBeGreaterThan(0);
+      expect(calls).toBe(callsAtFailure);
+      expect(active).toBe(0);
+    } finally {
+      release();
+      preview?.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  30000,
+);
+
+testIfDocker("discovery propagates result-processing errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jg-discovery-error-"));
+  const failure = new Error("broken result consumer");
+  try {
+    await writeFile(join(root, "source.txt"), "source\n");
+    await expect(
+      retrieve(
+        { root, query, signal: new AbortController().signal },
+        {
+          requests: 0,
+          async evaluate() {
+            return Object.defineProperty({}, "q0", {
+              get() {
+                throw failure;
+              },
+            });
+          },
+        },
+      ),
+    ).rejects.toBe(failure);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
