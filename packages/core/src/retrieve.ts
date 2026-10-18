@@ -730,8 +730,8 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
         await select();
         const evidence: Evidence[] = [];
         // Donor order is part of every follow-up request and its cache key. Files are selected
-        // concurrently, so completion order depends on network timing; donors use the order in
-        // which sequential selection would finish them instead: fewer groups first, then path.
+        // concurrently, so completion order depends on network timing; donors use a deterministic
+        // policy instead: fewer declaration groups first, then path.
         const donors = [...declarations.keys()].sort(
           (a, b) => groupCounts.get(a)! - groupCounts.get(b)! || (a < b ? -1 : a > b ? 1 : 0),
         );

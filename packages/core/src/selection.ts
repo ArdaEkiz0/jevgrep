@@ -182,7 +182,7 @@ export async function selectFile(
                 `Source lines ${unit.range.startLine}-${unit.range.endLine}; source bytes ${unit.sourceByteStart}-${unit.sourceByteEnd}:\n${sourceForUnit(snapshot, unit)}`,
             )
             .join("\n")
-        : bytes.length <= 16000
+        : bytes.length <= wholeFileContextBytes
           ? snapshot.source
           : `Opening context:\n${lines.slice(0, 20).join("\n")}\nSource lines ${first}-${last}:\n${lines.slice(first - 1, last).join("\n")}`;
     return evidenceRequest(

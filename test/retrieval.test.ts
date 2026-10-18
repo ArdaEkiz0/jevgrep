@@ -664,14 +664,14 @@ testIfDocker(
   async () => {
     const root = await mkdtemp(join(tmpdir(), "jg-donor-order-"));
     try {
-      // Twenty declarations need three groups; one declaration needs one.
+      // More than the per-request declaration limit needs multiple groups; one declaration needs one.
       await writeFile(
-        join(root, "many.ts"),
-        Array.from({ length: 20 }, (_, i) => `export function many${i}() {return ${i};}\n`).join(
+        join(root, "a-many.ts"),
+        Array.from({ length: 260 }, (_, i) => `export function many${i}() {return ${i};}\n`).join(
           "",
         ),
       );
-      await writeFile(join(root, "few.ts"), "export function few() {return 0;}\n");
+      await writeFile(join(root, "z-few.ts"), "export function few() {return 0;}\n");
       const donorOrders = async (slow: string) => {
         const orders: string[][] = [];
         await retrieve(
@@ -696,11 +696,11 @@ testIfDocker(
         );
         return orders;
       };
-      for (const slow of ["few.ts", "many.ts"]) {
+      for (const slow of ["z-few.ts", "a-many.ts"]) {
         const orders = await donorOrders(slow);
         expect(orders.length).toBeGreaterThan(0);
-        // Fewer declaration groups first, as sequential selection used to finish them.
-        for (const order of orders) expect(order).toEqual(["few.ts", "many.ts"]);
+        // Group count is the primary key; path is the tie-breaker.
+        for (const order of orders) expect(order).toEqual(["z-few.ts", "a-many.ts"]);
       }
     } finally {
       await rm(root, { recursive: true, force: true });

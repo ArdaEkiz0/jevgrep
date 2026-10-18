@@ -61,8 +61,8 @@ order must not be normalized to make a comparison pass.
 - One evaluator owns retries, cancellation and actual request accounting. Cache
   entries contain validated answers keyed by exact semantic request and namespace,
   never source or credentials. Cross-file evidence has a deterministic order, so
-  unchanged selections rebuild identical follow-up requests on a warm search, and
-  identical native requests reuse successful answers.
+  unchanged selections rebuild identical evidence follow-up requests on a warm
+  search, and identical native requests reuse successful answers.
 - Selected and rendered ranges remain distinct, and returned source is attributable
   to snapshot bytes. The current renderer places source before detailed reading leads; see the [architecture](../../../docs/architecture.md). Explicit
   source-budget overrides do not remove qualifying file locations.

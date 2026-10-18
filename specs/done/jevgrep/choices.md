@@ -55,11 +55,12 @@ Files A and B both produce selected source, and both enter the next cross-file
 request. Files are selected concurrently and used to enter in completion order.
 Most files need a single declaration group, so that order depended on provider
 timing: with jittered provider latency, warm searches resent 26 to 36 follow-up
-requests in half to all of the runs. Donors are now ordered explicitly: fewer
-declaration groups first, as sequential selection would finish them, then path.
-A warm search with unchanged selections therefore rebuilds the same follow-up
-requests. Sorting by filename alone would give Jev, the relevance classifier, a
-different input from the measured strategy, even if every source byte were retained.
+requests in half to all of the runs. Donors are now ordered explicitly by
+declaration-group count, then path, so the evidence pass does not inherit
+completion timing. The declaration groups themselves overlap, so this is a
+deterministic request policy rather than a claim about which file finishes first.
+A warm search with unchanged selections therefore rebuilds the same evidence
+requests; a filename-only order would be a different provider input.
 
 Navigation has the same property one level up. A directory level can span several
 concurrent navigation requests, and its decisions determine the next level's
@@ -67,7 +68,9 @@ items, pruned directories and relationship seeds, which are then regrouped into
 new requests. Decisions are therefore used in item order, not in the order their
 requests completed. With in-order responses this matches the earlier behavior;
 in a probe with 240 directories, five completion orders previously produced four
-different sets of later navigation requests and now produce one.
+different sets of later navigation requests and now produce one. Budget pauses and
+source confirmation remain bounded probes whose choices can reflect completion
+timing; the item-order rule covers the decisions that build later navigation.
 
 The reference fixture controls which source is selected so its comparison is
 stable. It may sort independent whole HTTP requests before comparing them, but
