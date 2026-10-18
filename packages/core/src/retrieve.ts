@@ -108,6 +108,13 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
     inspected.add(path);
     return result.snapshot;
   }
+  function isCancellation(error: unknown) {
+    return (
+      (error instanceof EvaluationFailure && error.kind === "cancelled") ||
+      (input.signal.aborted &&
+        (error === input.signal.reason || (error instanceof Error && error.name === "AbortError")))
+    );
+  }
   async function score(
     items: Iterable<NavigationItem> | AsyncIterable<NavigationItem>,
     anchor: { path: string; classes: string[] } | undefined,
@@ -210,7 +217,8 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
         let pending!: Promise<void>;
         pending = scoreGroup(group)
           .catch((error: unknown) => {
-            failure ??= error;
+            if (isCancellation(error)) issue("cancelled");
+            else failure ??= error;
           })
           .finally(() => {
             active.delete(pending);
@@ -297,7 +305,8 @@ export async function retrieve(input: SearchInput, evaluator: Evaluator): Promis
       if (batch.length) await submit(batch);
       await drain();
     } catch (error) {
-      failure ??= error;
+      if (isCancellation(error)) issue("cancelled");
+      else failure ??= error;
     } finally {
       await drain();
     }

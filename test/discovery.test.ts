@@ -1058,3 +1058,49 @@ testIfDocker("oversized preview chunks retain main's batch ordering", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+testIfDocker(
+  "cancellation during a later preview preserves an already scored navigation group",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "jg-discovery-preview-cancel-"));
+    const controller = new AbortController();
+    const source = await import("../packages/core/src/source");
+    const { spyOn } = await import("bun:test");
+    let firstGroupComplete!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      firstGroupComplete = resolve;
+    });
+    let preview;
+    try {
+      for (let index = 0; index < 128; index++)
+        await writeFile(join(root, `a${String(index).padStart(3, "0")}.txt`), `entry ${index}\n`);
+      await writeFile(join(root, "z.py"), "def f():\n    return 1\n".repeat(2000));
+      preview = spyOn(source, "pythonPreview").mockImplementation(async () => {
+        await Promise.race([completed, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+        const reason = new DOMException("cancelled by fixture", "AbortError");
+        controller.abort(reason);
+        throw reason;
+      });
+      const result = await retrieve(
+        { root, query: "find the implementation", signal: controller.signal },
+        {
+          requests: 0,
+          async evaluate(request) {
+            const state = request.state as { items?: Array<{ path: string }>; source?: string };
+            if (state.items)
+              return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+            firstGroupComplete();
+            return Object.fromEntries(Object.keys(request.questions).map((id) => [id, 0.9]));
+          },
+        },
+      );
+      expect(result.status).toBe("interrupted");
+      expect(result.files.map(({ path }) => path)).toContain("a000.txt");
+    } finally {
+      controller.abort();
+      firstGroupComplete();
+      preview?.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
