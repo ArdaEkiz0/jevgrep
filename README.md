@@ -45,11 +45,11 @@ It leaves research and implementation decisions to the calling agent. The curren
 checks for `jg` and installs the CLI if it is missing; authentication still needs
 your selected provider’s key. The skill installer itself does not configure credentials.
 
-`jg skill` installs the skill bundled with this release using a pinned
-[skills CLI](https://github.com/vercel-labs/skills), with npm lifecycle scripts
-disabled. Skill installation needs Node 22.20+ and npm/npx plus network access
-for the installer; it does not fetch skill instructions from GitHub. Use `jg skill`
-so the installed instructions match your CLI release.
+`jg skill` installs the `jevgrep` skill from the repository's `main` branch using
+a pinned [skills CLI](https://github.com/vercel-labs/skills), with npm lifecycle
+scripts disabled. Skill installation needs Node 22.20+ and npm/npx plus network
+access for the installer. Rerun `jg skill` to get the current skill without
+waiting for a new npm release.
 
 ### Upgrade
 
@@ -60,11 +60,11 @@ npm install -g @dzhng/jevgrep@latest
 jg --version
 ```
 
-After updating the CLI, refresh the installed skill by rerunning `jg skill`. Updating the npm package does not
-overwrite skill files in your projects. The installer records a machine-specific local
-path in `skills-lock.json`; `skills update` skips this entry. Rerun `jg skill` on
-another machine or after changing your Node installation. See the [package guide](apps/cli/README.md)
-for authentication details.
+After updating the CLI, refresh the installed skill by rerunning `jg skill`.
+Updating the npm package does not overwrite skill files in your projects. The
+installer records the GitHub source and skill path in `skills-lock.json`; rerun
+`jg skill` on another machine or after changing your Node installation. See the
+[package guide](apps/cli/README.md) for authentication details.
 
 ## Start with a question, leave with source
 

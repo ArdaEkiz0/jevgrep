@@ -467,7 +467,7 @@ test("skill command delegates installation to npx without credentials", async (t
     "--ignore-scripts",
     "skills@1.7.0",
     "add",
-    join(packageDirectory, "dist/skills/jevgrep"),
+    "dzhng/jevgrep@main",
     "--skill",
     "jevgrep",
     "--agent",
@@ -488,7 +488,7 @@ test("skill command delegates installation to npx without credentials", async (t
     "--ignore-scripts",
     "skills@1.7.0",
     "add",
-    join(packageDirectory, "dist/skills/jevgrep"),
+    "dzhng/jevgrep@main",
     "--skill",
     "jevgrep",
   ]);
